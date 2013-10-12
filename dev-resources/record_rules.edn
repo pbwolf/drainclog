@@ -2,16 +2,19 @@
  {:path "thing"
   :create {:props {:common-name {}, 
                    :parts {:multi true}}
-           :assign-by :eject}}
+           :eject true}}
 
  {:path "common-name" 
-  :text-value {:assign-prop :common-name}}
+  :text-value {:assign :common-name}}
+
+ {:path "part/parts/part/parts/part/parts"
+  :prune true}
 
  {:path "part"
   :create {:props {:qty {}, 
                    :common-name {}, 
                    :parts {:multi true}}
            :complete-by complete-part 
-           :assign-prop :parts}
-  :atts {"qty" {:assign-prop :qty}}}
+           :assign :parts}
+  :atts {"qty" {:assign :qty}}}
  ]

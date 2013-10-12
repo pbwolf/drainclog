@@ -4,22 +4,15 @@
   (:require [clojure.set :as set] 
             [clojure.string :as string]))
 
-;; all props assigned to by create or text-value without a specified path:
 (defn prop-targets-nopath 
-  "Set of properties assigned by :text-value, :create, or :attrs
-  without assign-path"
+  "Set of :assign targets within a :text-value, :create, or attribute"
   [rules]
   (set (remove nil?
                (for [rule rules, 
                      kk `[[:create] 
                           [:text-value] 
                           ~@(for [a (-> rule :atts keys)] [:atts a])]]
-                 (get-in rule `[~@kk :assign-prop])))))
-
-(defn props-declared
-  "Properties declared in :create :props"
-  [rules]
-  (reduce into #{} (map #(-> % :create :props keys) rules)))
+                 (get-in rule `[~@kk :assign])))))
 
 (defn- assign-1 [c v]
   v)
@@ -96,7 +89,7 @@
         (recur 
          (or (some-> 
               (.getAttributeLocalName xsr i)
-              (as-> X (get-in att-defs [X :assign-prop]))
+              (as-> X (get-in att-defs [X :assign]))
               (as-> X (assign-vec rules stk var-frames X))
               (as-> X (update-with state X (.getAttributeValue xsr i))))
              state)
@@ -144,106 +137,106 @@
   [state]
   (update-in state [:event-handler] pop))
 
+(defn- analyze-rules-*-number 
+  "Adds :ruleno to each rule, to facilitate identification for random access"
+  [cfg]
+  (update-in 
+   cfg [:rules] (fn [rules] 
+                  (vec
+                   (map-indexed (fn [i rule] (assoc rule :ruleno i)) rules)))))
+
+(defn- analyze-rules-*-compose-end-element
+  "Composes an :end-element handler for each rule, except :prune rules"
+  [symbols cfg]
+  (update-in 
+   cfg [:rules]
+   (fn [rules]
+     (mapv (fn [rule] 
+            (if (:prune rule)
+              rule
+              (->> [
+                    ;; Steps for an end-element handler:
+                    (when-let [t-p (-> rule :text-value :assign)]
+                      [(partial end-element-assign-text* t-p)])
+
+                    [end-element-varidx]
+
+                    (when-let [complete-f 
+                               (some-> (get-in rule [:create :complete-by])
+                                       (symbols))]
+                      [(partial end-element-complete* complete-f)])
+
+                    (when-let [o-p (get-in rule [:create :assign])]
+                      [(partial end-element-assign-ob* o-p)])
+
+                    (when-let [eject-how (get-in rule [:create :eject])]
+                      [(partial end-element-eject-ob* eject-how)])
+
+                    [end-element-nexthdlr*] 
+                    ]
+                   
+                   (apply concat)
+                   (reverse) ;; because comp runs fns right-to-left
+                   (apply comp)
+                   (assoc rule :end-element)))) 
+          rules))))
+
+(defn- analyze-rules-*-compose-start-element
+  "Composes a :start-element handler for each rule"
+  [cfg]
+  (let [assign-targets (prop-targets-nopath (:rules cfg))] 
+    (update-in 
+     cfg [:rules]
+     (fn [rules]
+       (mapv (fn [rule] 
+              (->> (if (:prune rule)
+                     [[start-element-pruning*]]
+                     [
+                      ;; Steps for a start-element handler:
+                      [(partial start-element-rule* 
+                                (:ruleno rule)
+                                (:end-element rule))]
+                      
+                      (if (:text-value rule)
+                        [start-element-textbuf*]
+                        [start-element-notextbuf*])
+                      
+                      (if-let 
+                          [rule-props-to-index
+                           (when-let [props (-> rule :create :props keys set)]
+                             (seq (set/intersection assign-targets props)))]
+                        [(partial start-element-vars* rule-props-to-index)]
+                        [start-element-novars*])
+                      
+                      (when-let [rule-atts (:atts rule)]
+                        [(partial start-element-atts* rule-atts)])
+                      ])
+                   (apply concat)
+                   (reverse) ;; because comp runs fns right-to-left
+                   (apply comp)
+                   (assoc rule :start-element))) 
+            rules)))))
+
+(defn analyze-rules-*-reverse-path-index
+  [cfg]
+  (assoc cfg :rev-path-to-ruleno
+         (reduce (fn [m {:keys [path ruleno] :as rule}]
+                   (assoc-in m 
+                             (-> path
+                                 (string/split #"/")
+                                 (as-> x (map keyword x))
+                                 (reverse))
+                             ruleno))
+                 {}
+                 (:rules cfg))))
+
 (defn analyze-rules
-  "Composes start- and end-element handlers, index of property to
-  declaring rule, and index of reverse tag path to rule"
   [rules symbols]
-  (let [props-to-index (prop-targets-nopath rules) 
-        rev-path-to-ruleno (loop [ret {}, i 0, rules rules]
-                             (if-let [rule (first rules)] 
-                               (recur 
-                                (assoc-in ret 
-                                          (reverse 
-                                           (map keyword
-                                                (string/split 
-                                                 (:path rule) #"/")))
-                                          i)
-                                (inc i)
-                                (rest rules))
-                               ret))]
-    {:rules (->> rules
-                 ;; Add :create :eject-by function
-                 (map (fn [rule] 
-                        (if ( = :eject (-> rule :create :assign-by))
-                          (let [eject-f (symbols 'eject)]
-                            (assoc-in rule [:create :eject-by] 
-                                      (or eject-f true)))
-                          rule)))
-                 ;; Add :complete-by function
-                 (map (fn [rule] 
-                        (if-let [complete-f 
-                                 (some-> (get-in rule [:create :complete-by])
-                                         (symbols))]
-                          (assoc rule :complete-by complete-f)
-                          rule)))
-                 ;; Add rule :props-to-index, a seq of the intersection
-                 ;; of the create rule's props and the global props-to-index.
-                 (map (fn [{{props :props :as create} :create :as rule}] 
-                        (if create
-                          (assoc rule :props-to-index
-                                 (seq (set/intersection
-                                       props-to-index (set (keys props)))))
-                          rule)))
-
-                 ;; Add :end-element composed function
-                 (map (fn [rule]
-                        (if (:prune rule)
-                          rule
-                          (->> [[end-element-nexthdlr*] 
-                                
-                                (when-let [eject-how 
-                                           (get-in rule [:create :eject-by])]
-                                  [(partial end-element-eject-ob* eject-how)])
-                                
-                                (when-let [o-p 
-                                           (get-in rule [:create :assign-prop])]
-                                  [(partial end-element-assign-ob* o-p)])
-                                
-                                (when-let [complete-f 
-                                           (:complete-by rule)]
-                                  [(partial end-element-complete* complete-f)])
-                                
-                                [end-element-varidx]
-                                
-                                (when-let [t-p 
-                                           (-> rule :text-value :assign-prop)]
-                                  [(partial end-element-assign-text* t-p)])]
-                               
-                               (apply concat)
-                               (apply comp)
-                               (assoc rule :end-element)))))
-                 
-                 ;; Add :ruleno
-                 (map-indexed (fn [i rule] (assoc rule :ruleno i)))
-
-                 ;; Add :start-element composed function
-                 (map (fn [rule]
-                        (let [filters 
-                              (if (:prune rule)
-                                [start-element-pruning*]
-                                
-                                ;; note: comp will run these last-to-first:
-                                (concat
-                                 (when-let [rule-atts (:atts rule)]
-                                   [(partial start-element-atts* rule-atts)])
-                                 
-                                 (if-let [rule-props-i (:props-to-index rule)] 
-                                   [(partial start-element-vars* rule-props-i)]
-                                   [start-element-novars*])
-                                 
-                                 (if (:text-value rule)
-                                   [start-element-textbuf*]
-                                   [start-element-notextbuf*])
-                                 
-                                 [(partial start-element-rule* 
-                                           (:ruleno rule)
-                                           (:end-element rule))]))]
-                          (assoc rule :start-element (apply comp filters)))))
-
-                 ;; Rules must be a vector, for random access:
-                 (vec))
-     :props-to-index props-to-index
-     :rev-path-to-ruleno rev-path-to-ruleno}))
+  (->> {:rules rules}
+       (analyze-rules-*-number)
+       (analyze-rules-*-compose-end-element symbols)
+       (analyze-rules-*-compose-start-element)
+       (analyze-rules-*-reverse-path-index)))
 
 (defn ruleno-from-index 
   "Given reverse-path index and a reverse path, trace the path into the
@@ -280,14 +273,6 @@
       (start-element-rtags)
       (start-element-rule)))
 
-(defn end-element-popstk
-  [state]
-  (update-in state [:stk] pop))
-
-(defn end-element-rtags 
-  [state]
-  (update-in state [:rtags] pop))
-
 (def end-element-dflts
   (comp end-element-varidx end-element-nexthdlr*))
 
@@ -296,8 +281,8 @@
                      end-element-dflts)]
     (-> state
         (end-el-f)
-        (end-element-popstk)
-        (end-element-rtags))))
+        (update-in [:stk] pop)
+        (update-in [:rtags] pop))))
 
 (defn on-chars [state, ^XMLStreamReader xsr]
   (when-let [^StringBuilder buf (-> state :stk peek :text-buf)]
@@ -388,13 +373,15 @@
         handler (peek (:event-handler state))
         state' (handler state)]
     (when state'
-      (if (.hasNext xsr)
-        (do (.next xsr) state')
-        nil))))
+      (assert (identical? xsr (:xsr state')))
+      (when (.hasNext xsr)
+        (.next xsr) 
+        state'))))
 
 (defn start-pull
-  "Rules - structure as illustrated above. Symbols - map of symbol to function,
-referred to by rule properties eject-by, complete-by. XSR - XmlStreamReader."
+  "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
+  symbol to function, referred to by rule property complete-by. XSR -
+  XmlStreamReader."
   [rules symbols ^XMLStreamReader xsr]
   (-> rules 
       (analyze-rules symbols)
@@ -416,14 +403,11 @@ referred to by rule properties eject-by, complete-by. XSR - XmlStreamReader."
         [eject (dissoc state' :eject)]
         (recur state')))))
 
-(defn pull-seq*
-  "Lazy sequence of objects pulled from the XML stream"
-  [state]
-  (lazy-seq 
-   (when-let [[ob state'] (pull-object state)]
-     (cons ob (pull-seq* state')))))
-
 (defn pull-seq
   "Lazy sequence of objects pulled from the XML stream"
   [rules symbols ^XMLStreamReader xsr]
-  (pull-seq* (start-pull rules symbols xsr)))
+  (letfn [(pull-seq* [state]
+            (lazy-seq 
+             (when-let [[ob state'] (pull-object state)]
+               (cons ob (pull-seq* state')))))]
+    (pull-seq* (start-pull rules symbols xsr))))

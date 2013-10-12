@@ -9,6 +9,11 @@
           <parts>
             <part qty="1">
               <common-name>knob</common-name>
+              <parts>
+                <part qty="zillions">
+                  <common-name>molecule</common-name>
+                </part>
+              </parts>
             </part>
             <part qty="1">
               <common-name>arm</common-name>

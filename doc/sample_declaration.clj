@@ -1,8 +1,9 @@
 
-;; The configuration is a vector of rules like this:
+;; The configuration is a vector of rules. Here is a sample rule:
 
 {
  ;; How to recognize an element:
+ ;; (The first rule that matches an element is the one that applies.)
  :path "tag" ;; or "parent/tag", "grand/parent/tag", etc.
 
  ;; If a Clojure map should be made from the element:
@@ -26,19 +27,19 @@
   ;; What to do with the completed result:
   ;; either assign it to a property (of the nearest enclosing element
   ;; that declares the property)
-  :assign-prop :whatever-prop 
+  :assign :whatever-prop 
   ;; or eject it (to the sequence of results): 
-  :assign-by :eject
+  :eject true
   }
  
  ;; If the element has significant attributes, assign them to properties:
  ;; The recipient is the nearest element that created a map with such a member.
  :atts {
-        "xml-attr-name" {:assign-prop :another-prop}} 
+        "xml-attr-name" {:assign :another-prop}} 
  
  ;; If the element has signficant text content, assign it to a property.
  ;; (Text of child elements is ignored.)
- :text-value {:assign-prop :still-another-prop}
+ :text-value {:assign :still-another-prop}
 }
 
 ;; Alternatively:  a "prune" rule makes xml-skim ignore the matched
