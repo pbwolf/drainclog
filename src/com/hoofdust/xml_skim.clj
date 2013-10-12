@@ -219,12 +219,14 @@
 
 (defn analyze-rules-*-reverse-path-index
   [cfg]
+  #_{:post [(do (println "reverse-path-index:" %) 1)]}
   (assoc cfg :rev-path-to-ruleno
          (reduce (fn [m {:keys [path ruleno] :as rule}]
                    (assoc-in m 
                              (-> path
                                  (string/split #"/")
-                                 (reverse))
+                                 (reverse)
+                                 (concat [:end]))
                              ruleno))
                  {}
                  (:rules cfg))))
@@ -237,15 +239,17 @@
        (analyze-rules-*-compose-start-element)
        (analyze-rules-*-reverse-path-index)))
 
-(defn ruleno-from-index 
+(defn ruleno-from-index
+  ;; problem : path a/b and path a-only conflict.
+  ;; solution: regard them as paths a/:end and a/b/:end.
   "Given reverse-path index and a reverse path, trace the path into the
   index far enough to get an integer. Nil if none."
   [idx path]
   (when-let [t (first path)]
-    (when-let [next-idx (get idx t)]
-      (if (number? next-idx)
-        next-idx
-        (recur next-idx (rest path))))))
+    (if-let [next-idx (get idx t)]
+      (if-let [deeper-answer (ruleno-from-index next-idx (rest path))]
+        deeper-answer
+        (:end next-idx)))))
 
 (defn start-element-rtags 
   "Returns state, with XSR's element local-name pushed onto the :rtags stack."
