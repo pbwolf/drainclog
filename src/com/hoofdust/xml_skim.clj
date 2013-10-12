@@ -224,7 +224,6 @@
                    (assoc-in m 
                              (-> path
                                  (string/split #"/")
-                                 (as-> x (map keyword x))
                                  (reverse))
                              ruleno))
                  {}
@@ -252,7 +251,7 @@
   "Returns state, with XSR's element local-name pushed onto the :rtags stack."
   [state]
   (let [^XMLStreamReader xsr (:xsr state)] 
-    (update-in state [:rtags] conj (keyword (.getLocalName xsr)))))
+    (update-in state [:rtags] conj (.getLocalName xsr))))
 
 (defn start-element-dflts [state]
   (-> state 
@@ -383,6 +382,9 @@
   symbol to function, referred to by rule property complete-by. XSR -
   XmlStreamReader."
   [rules symbols ^XMLStreamReader xsr]
+  ;; Note: Tried keeping keywords, not strings, in :rtags, but,
+  ;; VisualVM said Symbol.intern was spending lots of time, and, sure
+  ;; enough, the program got faster after abandoning keywordization.
   (-> rules 
       (analyze-rules symbols)
       (assoc :rtags '())
