@@ -3,8 +3,10 @@
 
 {
  ;; How to recognize an element:
- ;; (The first rule that matches an element is the one that applies.)
- :path "tag" ;; or "parent/tag", "grand/parent/tag", etc.
+ ;; (The rule of longest path that matches an element is the one that applies.
+ ;; That is: if there are 3 rules: grand/parent/tag, parent/tag, and tag 
+ ;; then grand/parent/tag will be selected if possible.)
+ :path "tag" 
 
  ;; If a Clojure map should be made from the element:
  :create

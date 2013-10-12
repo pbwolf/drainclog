@@ -7,7 +7,7 @@
  {:path "common-name" 
   :text-value {:assign :common-name}}
 
- {:path "part/parts/part/parts/part/parts"
+ {:path "part/parts/part/parts/part/parts/part"
   :prune true}
 
  {:path "part"
