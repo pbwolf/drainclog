@@ -342,26 +342,19 @@
 
 (defn pull-parse-event-pruning
   [state]
-  (let [^XMLStreamReader xsr (:xsr state) 
-        e (.getEventType xsr)]
-    (cond
-     (= e XMLStreamConstants/END_DOCUMENT)
-     nil
-     
-     (= e XMLStreamConstants/START_ELEMENT)
-     (update-in state [:event-handler] conj pull-parse-event-pruning)
-     
-     (= e XMLStreamConstants/END_ELEMENT)
-     (update-in state [:event-handler] pop)
-     
-     ;; else:
-     ;; XMLStreamConstants/START_DOCUMENT
-     ;; XMLStreamConstants/CHARACTERS
-     ;; XMLStreamConstants/COMMENT
-     ;; XMLStreamConstants/PROCESSING_INSTRUCTION 
-     ;; XMLStreamConstants/SPACE
-     :else
-     state)))
+  (let [^XMLStreamReader xsr (:xsr state)]
+    (loop [levels 0, e (.getEventType xsr)]
+      (cond
+       (= e XMLStreamConstants/START_ELEMENT)
+       (recur (inc levels), (.next xsr))
+
+       (= e XMLStreamConstants/END_ELEMENT)
+       (when ( < 0 levels)
+         (recur (dec levels) (.next xsr)))
+       
+       :else
+       (recur levels (.next xsr)))))
+  (update-in state [:event-handler] pop))
 
 (defn pull-parse-event-advance
   "Computes new state, based on old state and event, ejects the
