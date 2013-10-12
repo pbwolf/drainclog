@@ -1,0 +1,17 @@
+[
+ {:path "thing"
+  :create {:props {:common-name {}, 
+                   :parts {:multi true}}
+           :assign-by :eject}}
+
+ {:path "common-name" 
+  :text-value {:assign-prop :common-name}}
+
+ {:path "part"
+  :create {:props {:qty {}, 
+                   :common-name {}, 
+                   :parts {:multi true}}
+           :complete-by complete-part 
+           :assign-prop :parts}
+  :atts {"qty" {:assign-prop :qty}}}
+ ]

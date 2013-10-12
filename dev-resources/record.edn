@@ -1,0 +1,9 @@
+{:common-name "automobile"
+ :parts [{:qty 4
+          :common-name "door"
+          :parts [{:qty 1
+                   :common-name "window crank"
+                   :parts [{:qty 1
+                            :common-name "knob"}
+                           {:qty 1
+                            :common-name "arm"}]}]}]}

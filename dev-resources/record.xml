@@ -1,0 +1,21 @@
+<thing>
+  <common-name>automobile</common-name>
+  <parts>
+    <part qty="4">
+      <common-name>door</common-name>
+      <parts>
+        <part qty="1">
+          <common-name>window crank</common-name>
+          <parts>
+            <part qty="1">
+              <common-name>knob</common-name>
+            </part>
+            <part qty="1">
+              <common-name>arm</common-name>
+            </part>
+          </parts>
+        </part>
+      </parts>
+    </part>
+  </parts>
+</thing>
