@@ -16,6 +16,9 @@ in memory, then parsing it with `clojure.xml`, then reworking the
 XML data representation into data structures that make sense for
 processing.
 
+Unlike clojure.xml, xml-skim yields no data by default.  Only when 
+the configuration says to make data does it gather data.
+
 ## Configuration
 
 The configuration describes (a) the file and (b) the resulting data
@@ -39,12 +42,6 @@ handlers from the declaration.
 We use the tag-path *tail* because the *leaf* element is often a
 sufficient basis for selecting a processing rule, and when it's not,
 often the leaf and its immediate parent suffice.  
-
-While reading the file, and particularly as each element opens,
-xml-skim traverses the configuration list to figure out what to do,
-then memoizes the answer.  Therefore, the linear search through the
-configuration should not be too onerous for files of regular,
-repeating structure.
 
 ## Non-features
 
