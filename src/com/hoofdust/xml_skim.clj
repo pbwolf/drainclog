@@ -62,7 +62,7 @@
 
        (= e XMLStreamConstants/END_ELEMENT)
        (when ( < 0 levels)
-         (recur (dec levels) (.next xsr)))
+         (recur (dec levels) (.next xsr))) ;; nextTag does not save time
        
        :else
        (recur levels (.next xsr)))))
@@ -369,7 +369,7 @@
     (when state'
       (assert (identical? xsr (:xsr state')))
       (when (.hasNext xsr)
-        (.next xsr) 
+        (.next xsr)  ;; .nextTag, on endElement, in files with no mixed content, saves a tiny amount of time
         state'))))
 
 (defn start-pull
