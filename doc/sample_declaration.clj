@@ -22,11 +22,11 @@
 
   ;; If the accrued map needs refinement, use 
   :complete-by 'fn-symbol
-  ;; to indicate indirectly a function of the preliminary result.
-  ;; The actual result is the function's value.
-  ;; The parser's caller supplies a map of symbol-to-actual-function.
+  ;; to indicate indirectly a function of the preliminary result.  The
+  ;; actual result is the function's value.  The parser's caller
+  ;; supplies a map of symbol-to-actual-function.
 
-  ;; What to do with the completed result:
+  ;; What to do with a non-nil completed result:
   ;; either assign it to a property (of the nearest enclosing element
   ;; that declares the property)
   :assign :whatever-prop 

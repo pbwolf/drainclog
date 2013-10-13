@@ -38,7 +38,9 @@
         (is (= (vec (pull-seq rules 
                               {'complete-part
                                 (fn [part] 
-                                  (update-in part [:qty] #(Long/parseLong %)))}
+                                  (let [qty (Long/parseLong (:qty part))] 
+                                    (when ( < 0 qty ) 
+                                      (assoc-in part [:qty] qty))))}
                               xsr)) 
                [expected]))))))
 
