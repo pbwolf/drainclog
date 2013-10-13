@@ -20,6 +20,9 @@
             </part>
           </parts>
         </part>
+        <part qty="0">
+          <common-name>cheese burrito</common-name>
+        </part>
       </parts>
     </part>
   </parts>
