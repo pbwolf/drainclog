@@ -4,13 +4,21 @@
   (:require [clojure.set :as set] 
             [clojure.string :as string]))
 
-(defn prop-targets-nopath 
+(defn prop-targets 
   "Set of :assign targets within a :text-value, :create, or attribute"
   [rules]
   (set (remove nil?
                (for [rule rules, 
                      kk `[[:create] 
                           [:text-value] 
+                          ~@(for [a (-> rule :atts keys)] [:atts a])]]
+                 (get-in rule `[~@kk :assign])))))
+
+(defn rule-attr+text-targets 
+  "For one rule, the set of :assign targets within a :text-value or attribute"
+  [rule]
+  (set (remove nil?
+               (for [kk `[[:text-value] 
                           ~@(for [a (-> rule :atts keys)] [:atts a])]]
                  (get-in rule `[~@kk :assign])))))
 
@@ -51,6 +59,15 @@
   [state]
   (update-in state [:event-handler] conj pull-parse-event-pruning))
 
+;; start-element handlers:
+
+;; variants:
+;;  (1) create object or not?
+;;  (2) attend to attributes or not?
+;;  (3) with contents:  prune or text or children?
+;; that's... 12? variants.
+
+
 (defn start-element-rule* 
   [ruleno end-el-f state]
   (update-in state [:stk] conj {:ruleno ruleno, :end-element end-el-f}))
@@ -70,8 +87,8 @@
   (let [var-frames (or (peek (:var-idx state)) {})]
     (update-in state [:var-idx] conj var-frames)))
 
-(defn start-element-vars*
-  [rule-props-to-index state]
+(defn start-element-vars*-
+  [state rule-props-to-index]
   (let [stk (:stk state)
         last-frame-no (dec (count stk))
         var-frames (peek (:var-idx state))]
@@ -79,8 +96,8 @@
                (merge var-frames 
                       (zipmap rule-props-to-index (repeat last-frame-no))))))
 
-(defn start-element-atts*
-  [att-defs {:keys [rules stk] :as state}]
+(defn start-element-atts*-
+  [{:keys [rules stk] :as state} att-defs]
   (let [^XMLStreamReader xsr (:xsr state)
         var-frames (peek (:var-idx state))]
     (loop [state state, i (dec (.getAttributeCount xsr))]
@@ -184,44 +201,99 @@
 (defn- analyze-rules-*-compose-start-element
   "Composes a :start-element handler for each rule"
   [cfg]
-  (let [assign-targets (prop-targets-nopath (:rules cfg))] 
+  (let [assign-targets (prop-targets (:rules cfg))] 
     (update-in 
      cfg [:rules]
      (fn [rules]
        (mapv (fn [rule] 
-              (->> (if (:prune rule)
-                     [[start-element-pruning*]]
-                     [
-                      ;; Steps for a start-element handler:
-                      [(partial start-element-rule* 
-                                (:ruleno rule)
-                                (:end-element rule))]
-                      
-                      (if (:text-value rule)
-                        [start-element-textbuf*]
-                        [start-element-notextbuf*])
-                      
-                      (if-let 
-                          [rule-props-to-index
-                           (when-let [props (-> rule :create :props keys set)]
-                             (seq (set/intersection assign-targets props)))]
-                        [(partial start-element-vars* rule-props-to-index)]
-                        [start-element-novars*])
-                      
-                      (when-let [rule-atts (:atts rule)]
-                        [(partial start-element-atts* rule-atts)])
-                      ])
-                   (apply concat)
-                   (reverse) ;; because comp runs fns right-to-left
-                   (apply comp)
-                   (assoc rule :start-element))) 
-            rules)))))
+               (assoc rule :start-element
+                      (let [rule-props-to-index
+                            (when-let [props (-> rule :create :props keys set)]
+                              (seq (set/intersection assign-targets props)))
+                            
+                            external-targets
+                            (->> (concat
+                                  [(get-in rule [:create :assign])]
+                                  (set/difference
+                                   (rule-attr+text-targets rule)
+                                   (set (-> rule :create :props keys))))
+                                 (remove nil?))
+                            
+                            external-targets-set (set external-targets)
+
+                            create (when (:create rule) :create)
+                            atts   (:atts rule)
+                            content (cond 
+                                     (:prune rule)      :prune
+                                     (:text-value rule) :text
+                                     :else              :children) 
+                            ejecting? (-> rule :create :eject)
+                            
+                            ruleno (:ruleno rule)
+                            end-el-f (:end-element rule)
+                            ]
+                        (when-not (or ejecting?
+                                      (:prune rule) 
+                                      (seq external-targets))
+                          (throw (RuntimeException. 
+                                  (str "This rule targets nothing: " rule))))
+                        
+                        (fn [state]
+                          (let [ext-varidx (peek (:var-idx state))]
+                            (condp = content
+                              :text 
+                              (do 
+                                ;; text guarantees no child elts.
+                                ;; Need stk frame only if creating new object.
+                                ;; And then only b/c too confusing otherwise.
+                                ;; There might be atts.
+                                (if rule-props-to-index
+                                  (-> state
+                                      (update-in [:stk] conj 
+                                                 {:ruleno ruleno, 
+                                                  :end-element end-el-f})
+                                      (start-element-vars*- rule-props-to-index)
+                                      (start-element-textbuf*)
+                                      (cond-> atts (start-element-atts*- atts)))
+                                  (-> state
+                                      (update-in [:stk] conj 
+                                                 {:ruleno ruleno, 
+                                                  :end-element end-el-f})
+                                      (update-in [:var-idx] conj
+                                                 (or ext-varidx {}))
+                                      (start-element-textbuf*)
+                                      (cond-> atts 
+                                              (start-element-atts*- atts)))))
+                              :children 
+                              (do 
+                                (if rule-props-to-index
+                                  (-> state
+                                      (update-in [:stk] conj 
+                                                 {:ruleno ruleno, 
+                                                  :end-element end-el-f})
+                                      (start-element-vars*- rule-props-to-index)
+                                      (start-element-notextbuf*)
+                                      (cond-> atts (start-element-atts*- atts)))
+                                  (-> state
+                                      (update-in [:stk] conj 
+                                                 {:ruleno ruleno, 
+                                                  :end-element end-el-f})
+                                      (update-in [:var-idx] conj
+                                                 (or ext-varidx {}))
+                                      (start-element-notextbuf*)
+                                      (cond-> atts 
+                                              (start-element-atts*- atts)))))
+                              :prune
+                              (do
+                                (start-element-pruning* state)))))))) 
+             rules)))))
 
 (defn analyze-rules-*-reverse-path-index
   [cfg]
-  #_{:post [(do (println "reverse-path-index:" %) 1)]}
   (assoc cfg :rev-path-to-ruleno
          (reduce (fn [m {:keys [path ruleno] :as rule}]
+                   (when-not path 
+                     (throw (RuntimeException. (str "Rule has no path: " rule))))
                    (assoc-in m 
                              (-> path
                                  (string/split #"/")
@@ -251,12 +323,6 @@
         deeper-answer
         (:end next-idx)))))
 
-(defn start-element-rtags 
-  "Returns state, with XSR's element local-name pushed onto the :rtags stack."
-  [state]
-  (let [^XMLStreamReader xsr (:xsr state)] 
-    (update-in state [:rtags] conj (.getLocalName xsr))))
-
 (defn start-element-dflts [state]
   (-> state 
       (update-in [:stk] conj nil)
@@ -272,9 +338,10 @@
     (start-element-dflts state)))
 
 (defn start-element [state]
-  (-> state 
-      (start-element-rtags)
-      (start-element-rule)))
+  (let [^XMLStreamReader xsr (:xsr state)] 
+    (-> state 
+        (update-in [:rtags] conj (.getLocalName xsr))
+        (start-element-rule))))
 
 (def end-element-dflts
   (comp end-element-varidx end-element-nexthdlr*))
@@ -358,7 +425,9 @@
        
        :else
        (recur levels (.next xsr)))))
-  (update-in state [:event-handler] pop))
+  (-> state
+      (update-in [:event-handler] pop)
+      (update-in [:rtags] pop)))
 
 (defn pull-parse-event-advance
   "Computes new state, based on old state and event, ejects the
@@ -399,7 +468,11 @@
   (loop [state state]
     (when-let [state' (pull-parse-event-advance state)]
       (if-let [eject (:eject state')] 
-        [eject (dissoc state' :eject)]
+        (do 
+          (when (:warning-pruned state')
+            (println "Warning: Pruned useless paths: " 
+                     (:warning-pruned state')))
+          [eject (dissoc state' :eject :warning-pruned)])
         (recur state')))))
 
 (defn pull-seq
