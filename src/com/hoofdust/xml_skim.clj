@@ -69,20 +69,6 @@
   (-> state
       (update-in [:rtags] pop)))
 
-;; start-element handlers:
-
-;; variants:
-;;  (1) create object or not?
-;;  (2) attend to attributes or not?
-;;  (3) with contents:  prune or text or children?
-;; that's... 12? variants.
-
-
-(defn start-element-textbuf*
-  [{:keys [stk] :as state}]
-  (-> state 
-      (assoc-in [:stk (dec (count stk)) :text-buf] (StringBuilder.))))
-
 (defn start-element-novars*
   [state]
   (let [var-frames (or (peek (:var-idx state)) {})]
@@ -113,10 +99,6 @@
              state)
          (dec i))))))
 
-(defn end-element-varidx
-  [state]
-  (update-in state [:var-idx] pop))
-
 (defn end-element-complete*
   [complete-f, {:keys [stk] :as state}]
   (let [frame (peek stk)]
@@ -141,13 +123,11 @@
           state))
     state))
 
-(def end-element-dflts end-element-varidx)
-
 (defn end-element [state]
-  (let [end-el-f (or (-> state :stk peek :end-element)
-                     end-element-dflts)]
+  (let [end-el-f (-> state :stk peek :end-element) ]
     (-> state
-        (end-el-f)
+        (update-in [:var-idx] pop)
+        (cond-> end-el-f (end-el-f))
         (update-in [:stk] pop)
         (update-in [:rtags] pop))))
 
@@ -170,8 +150,6 @@
               rule
               (->> [
                     ;; Steps for an end-element handler:
-
-                    [end-element-varidx]
 
                     (when-let [complete-f 
                                (some-> (get-in rule [:create :complete-by])
@@ -292,8 +270,6 @@
   [cfg]
   (assoc cfg :rev-path-to-ruleno
          (reduce (fn [m {:keys [path ruleno] :as rule}]
-                   (when-not path 
-                     (throw (RuntimeException. (str "Rule has no path: " rule))))
                    (assoc-in m 
                              (-> path
                                  (string/split #"/")
@@ -312,8 +288,6 @@
        (analyze-rules-*-reverse-path-index)))
 
 (defn ruleno-from-index
-  ;; problem : path a/b and path a-only conflict.
-  ;; solution: regard them as paths a/:end and a/b/:end.
   "Given reverse-path index and a reverse path, trace the path into the
   index far enough to get an integer. Nil if none."
   [idx path]
@@ -323,29 +297,21 @@
         deeper-answer
         (:end next-idx)))))
 
-(defn start-element-dflts [state]
-  (-> state 
-      (update-in [:stk] conj nil)
-      (start-element-novars*)))
-
 (defn start-element-rule
   "Identifies rule suitable for state's :rtags. Pushes stack frame."
   [{:keys [rev-path-to-ruleno rtags] :as state}]
   (if-let [ruleno (ruleno-from-index rev-path-to-ruleno rtags)]
     (let [start-el-f (get-in state [:rules ruleno :start-element])]
       (start-el-f state))
-    (start-element-dflts state)))
+    (-> state 
+        (update-in [:stk] conj nil)
+        (start-element-novars*))))
 
 (defn start-element [state]
   (let [^XMLStreamReader xsr (:xsr state)] 
     (-> state 
         (update-in [:rtags] conj (.getLocalName xsr))
         (start-element-rule))))
-
-(defn on-chars [state, ^XMLStreamReader xsr]
-  (when-let [^StringBuilder buf (-> state :stk peek :text-buf)]
-    (.append buf (.getText xsr)))
-  state)
 
 (defn pull-parse-event-advance
   "Computes new state, based on old state and event, ejects the
