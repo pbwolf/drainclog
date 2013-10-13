@@ -51,13 +51,23 @@
 ;; The start-element handler may prescribe a nested event loop,
 ;; so predeclare the event loops:
 
-(declare pull-parse-event)
-(declare pull-parse-event-chars)
-(declare pull-parse-event-pruning)
-
 (defn start-element-pruning*
   [state]
-  (update-in state [:event-handler] conj pull-parse-event-pruning))
+  (let [^XMLStreamReader xsr (:xsr state)]
+    (.next xsr)
+    (loop [levels 0, e (.getEventType xsr)]
+      (cond
+       (= e XMLStreamConstants/START_ELEMENT)
+       (recur (inc levels), (.next xsr))
+
+       (= e XMLStreamConstants/END_ELEMENT)
+       (when ( < 0 levels)
+         (recur (dec levels) (.next xsr)))
+       
+       :else
+       (recur levels (.next xsr)))))
+  (-> state
+      (update-in [:rtags] pop)))
 
 ;; start-element handlers:
 
@@ -68,19 +78,10 @@
 ;; that's... 12? variants.
 
 
-(defn start-element-rule* 
-  [ruleno end-el-f state]
-  (update-in state [:stk] conj {:ruleno ruleno, :end-element end-el-f}))
-
 (defn start-element-textbuf*
   [{:keys [stk] :as state}]
   (-> state 
-      (assoc-in [:stk (dec (count stk)) :text-buf] (StringBuilder.))
-      (update-in [:event-handler] conj pull-parse-event-chars)))
-
-(defn start-element-notextbuf*
-  [state]
-  (update-in state [:event-handler] conj pull-parse-event))
+      (assoc-in [:stk (dec (count stk)) :text-buf] (StringBuilder.))))
 
 (defn start-element-novars*
   [state]
@@ -112,16 +113,6 @@
              state)
          (dec i))))))
 
-(defn start-element-nexthdlr*
-  [hdlr state]
-  (update-in state [:event-handler] conj hdlr))
-
-(defn end-element-assign-text* 
-  [t-p, {:keys [stk rules var-idx] :as state}]
-  (let [{:keys [text-buf] :as frame} (peek stk)
-        [t-uks t-uf] (assign-vec rules stk (peek var-idx) t-p)]
-    (cond-> state t-uks (update-in t-uks t-uf (str text-buf)))))
-
 (defn end-element-varidx
   [state]
   (update-in state [:var-idx] pop))
@@ -150,9 +141,15 @@
           state))
     state))
 
-(defn end-element-nexthdlr*
-  [state]
-  (update-in state [:event-handler] pop))
+(def end-element-dflts end-element-varidx)
+
+(defn end-element [state]
+  (let [end-el-f (or (-> state :stk peek :end-element)
+                     end-element-dflts)]
+    (-> state
+        (end-el-f)
+        (update-in [:stk] pop)
+        (update-in [:rtags] pop))))
 
 (defn- analyze-rules-*-number 
   "Adds :ruleno to each rule, to facilitate identification for random access"
@@ -173,8 +170,6 @@
               rule
               (->> [
                     ;; Steps for an end-element handler:
-                    (when-let [t-p (-> rule :text-value :assign)]
-                      [(partial end-element-assign-text* t-p)])
 
                     [end-element-varidx]
 
@@ -189,7 +184,6 @@
                     (when-let [eject-how (get-in rule [:create :eject])]
                       [(partial end-element-eject-ob* eject-how)])
 
-                    [end-element-nexthdlr*] 
                     ]
                    
                    (apply concat)
@@ -197,6 +191,12 @@
                    (apply comp)
                    (assoc rule :end-element)))) 
           rules))))
+
+(defn stax-nab-text! [{:keys [stk rules var-idx] :as state} t-p]
+  (let [^XMLStreamReader xsr (:xsr state) 
+        stuff (.getElementText xsr)
+        [t-uks t-uf] (assign-vec rules stk (peek var-idx) t-p)]
+    (cond-> state t-uks (update-in t-uks t-uf stuff))))
 
 (defn- analyze-rules-*-compose-start-element
   "Composes a :start-element handler for each rule"
@@ -231,13 +231,14 @@
                             
                             ruleno (:ruleno rule)
                             end-el-f (:end-element rule)
+
+                            t-p (-> rule :text-value :assign)
                             ]
                         (when-not (or ejecting?
                                       (:prune rule) 
                                       (seq external-targets))
                           (throw (RuntimeException. 
                                   (str "This rule targets nothing: " rule))))
-                        
                         (fn [state]
                           (let [ext-varidx (peek (:var-idx state))]
                             (condp = content
@@ -253,17 +254,18 @@
                                                  {:ruleno ruleno, 
                                                   :end-element end-el-f})
                                       (start-element-vars*- rule-props-to-index)
-                                      (start-element-textbuf*)
-                                      (cond-> atts (start-element-atts*- atts)))
+                                      (cond-> atts (start-element-atts*- atts))
+                                      (stax-nab-text! t-p)
+                                      (end-element))
                                   (-> state
                                       (update-in [:stk] conj 
                                                  {:ruleno ruleno, 
                                                   :end-element end-el-f})
                                       (update-in [:var-idx] conj
                                                  (or ext-varidx {}))
-                                      (start-element-textbuf*)
-                                      (cond-> atts 
-                                              (start-element-atts*- atts)))))
+                                      (cond-> atts (start-element-atts*- atts))
+                                      (stax-nab-text! t-p)
+                                      (end-element))))
                               :children 
                               (do 
                                 (if rule-props-to-index
@@ -272,7 +274,6 @@
                                                  {:ruleno ruleno, 
                                                   :end-element end-el-f})
                                       (start-element-vars*- rule-props-to-index)
-                                      (start-element-notextbuf*)
                                       (cond-> atts (start-element-atts*- atts)))
                                   (-> state
                                       (update-in [:stk] conj 
@@ -280,7 +281,6 @@
                                                   :end-element end-el-f})
                                       (update-in [:var-idx] conj
                                                  (or ext-varidx {}))
-                                      (start-element-notextbuf*)
                                       (cond-> atts 
                                               (start-element-atts*- atts)))))
                               :prune
@@ -326,8 +326,7 @@
 (defn start-element-dflts [state]
   (-> state 
       (update-in [:stk] conj nil)
-      (start-element-novars*)
-      (start-element-notextbuf*)))
+      (start-element-novars*)))
 
 (defn start-element-rule
   "Identifies rule suitable for state's :rtags. Pushes stack frame."
@@ -343,91 +342,10 @@
         (update-in [:rtags] conj (.getLocalName xsr))
         (start-element-rule))))
 
-(def end-element-dflts
-  (comp end-element-varidx end-element-nexthdlr*))
-
-(defn end-element [state]
-  (let [end-el-f (or (-> state :stk peek :end-element)
-                     end-element-dflts)]
-    (-> state
-        (end-el-f)
-        (update-in [:stk] pop)
-        (update-in [:rtags] pop))))
-
 (defn on-chars [state, ^XMLStreamReader xsr]
   (when-let [^StringBuilder buf (-> state :stk peek :text-buf)]
     (.append buf (.getText xsr)))
   state)
-
-(defn pull-parse-event
-  "Computes new state, based on old state and event. Returns new state,
-  or nil if the event indicates that the document is over."
-  [state]
-  (let [^XMLStreamReader xsr (:xsr state) 
-        e (.getEventType xsr)]
-    (cond
-     (= e XMLStreamConstants/END_DOCUMENT)
-     nil
-     
-     (= e XMLStreamConstants/START_ELEMENT)
-     (start-element state)
-     
-     (= e XMLStreamConstants/END_ELEMENT)
-     (end-element state)
-     
-     ;; else:
-     ;; XMLStreamConstants/CHARACTERS
-     ;; XMLStreamConstants/START_DOCUMENT
-     ;; XMLStreamConstants/COMMENT
-     ;; XMLStreamConstants/PROCESSING_INSTRUCTION 
-     ;; XMLStreamConstants/SPACE
-     :else
-     state)))
-
-(defn pull-parse-event-chars
-  "Computes new state, based on old state and event. Returns new state,
-  or nil if the event indicates that the document is over."
-  [state]
-  (let [^XMLStreamReader xsr (:xsr state) 
-        e (.getEventType xsr)]
-    (cond
-     (= e XMLStreamConstants/END_DOCUMENT)
-     nil
-     
-     (= e XMLStreamConstants/START_ELEMENT)
-     (start-element state)
-     
-     (= e XMLStreamConstants/END_ELEMENT)
-     (end-element state)
-     
-     (= e XMLStreamConstants/CHARACTERS)
-     (on-chars state xsr)
-     
-     ;; else:
-     ;; XMLStreamConstants/START_DOCUMENT
-     ;; XMLStreamConstants/COMMENT
-     ;; XMLStreamConstants/PROCESSING_INSTRUCTION 
-     ;; XMLStreamConstants/SPACE
-     :else
-     state)))
-
-(defn pull-parse-event-pruning
-  [state]
-  (let [^XMLStreamReader xsr (:xsr state)]
-    (loop [levels 0, e (.getEventType xsr)]
-      (cond
-       (= e XMLStreamConstants/START_ELEMENT)
-       (recur (inc levels), (.next xsr))
-
-       (= e XMLStreamConstants/END_ELEMENT)
-       (when ( < 0 levels)
-         (recur (dec levels) (.next xsr)))
-       
-       :else
-       (recur levels (.next xsr)))))
-  (-> state
-      (update-in [:event-handler] pop)
-      (update-in [:rtags] pop)))
 
 (defn pull-parse-event-advance
   "Computes new state, based on old state and event, ejects the
@@ -435,8 +353,19 @@
   next event. Returns new state, or nil if document is over."
   [state]
   (let [^XMLStreamReader xsr (:xsr state) 
-        handler (peek (:event-handler state))
-        state' (handler state)]
+        state' (let [e (.getEventType xsr)]
+                 (cond
+                  (= e XMLStreamConstants/END_DOCUMENT)
+                  nil
+                  
+                  (= e XMLStreamConstants/START_ELEMENT)
+                  (start-element state)
+                  
+                  (= e XMLStreamConstants/END_ELEMENT)
+                  (end-element state)
+                  
+                  :else
+                  state))]
     (when state'
       (assert (identical? xsr (:xsr state')))
       (when (.hasNext xsr)
@@ -456,8 +385,7 @@
       (assoc :rtags '())
       (assoc :stk [])
       (assoc :var-idx []) ;; stack of hash of var key to stk index
-      (assoc :xsr xsr)
-      (assoc :event-handler (list pull-parse-event))))
+      (assoc :xsr xsr)))
 
 (defn pull-object
   "Interprets XML stream until an object is ready to eject. Returns a
