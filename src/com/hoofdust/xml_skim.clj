@@ -1,7 +1,8 @@
 (ns com.hoofdust.xml-skim
   "Reads XML, described by rules, into structures"
   (:import [javax.xml.stream XMLStreamConstants XMLStreamReader])
-  (:require [clojure.set :as set] 
+  (:require [clojure.pprint :refer [pprint]] 
+            [clojure.set :as set] 
             [clojure.string :as string]))
 
 (defn prop-targets 
@@ -22,29 +23,17 @@
                           ~@(for [a (-> rule :atts keys)] [:atts a])]]
                  (get-in rule `[~@kk :assign])))))
 
-(defn- assign-1 [c v]
-  v)
-
+;; is this better/worse/same as (fnil conj [])
 (defn- assign-multi [c v]
   (conj (or c []) v))
+
+(defn- assign-1 [c v]
+  v)
 
 (defn- update-with 
   "Like update-in, but takes keys and function in a vector"
   [a [ks uf] v]
   (update-in a ks uf v))
-
-(defn assign-vec 
-  "Figures out how to assign to a property. Returns a vector of two
-  elements: an update-in vector for the parse state, and a combining
-  fn that reflects whether the property is to be multi-valued. Nil,
-  instead of the vector, if the prop can't be assigned."
-  [rules stk var-frames prop]
-  (when-let [frame-no (var-frames prop)]
-    (let [frame (get stk frame-no)
-          rule  (get rules (:ruleno frame))
-          propdef (-> rule :create :props prop)
-          multi? (:multi propdef)]
-     [[:stk frame-no :ob prop] (if multi? assign-multi assign-1)])) )
 
 ;; Here are some composable aspects of start-element and end-element handlers.  
 ;; The rule analyzer includes aspects required by the rules.
@@ -69,53 +58,40 @@
   (-> state
       (update-in [:rtags] pop)))
 
-(defn start-element-novars*
-  [state]
-  (let [var-frames (or (peek (:var-idx state)) {})]
-    (update-in state [:var-idx] conj var-frames)))
-
-(defn start-element-vars*-
-  [state rule-props-to-index]
-  (let [stk (:stk state)
-        last-frame-no (dec (count stk))
-        var-frames (peek (:var-idx state))]
-    (update-in state [:var-idx] conj 
-               (merge var-frames 
-                      (zipmap rule-props-to-index (repeat last-frame-no))))))
-
-(defn start-element-atts*-
-  [{:keys [rules stk] :as state} att-defs]
-  (let [^XMLStreamReader xsr (:xsr state)
-        var-frames (peek (:var-idx state))]
+(defn start-element-atts*-+
+  [state {:keys [sink] :as pp}]
+  (let [^XMLStreamReader xsr (:xsr state)]
     (loop [state state, i (dec (.getAttributeCount xsr))]
       (if (neg? i)
         state
         (recur 
          (or (some-> 
               (.getAttributeLocalName xsr i)
-              (as-> X (get-in att-defs [X :assign]))
-              (as-> X (assign-vec rules stk var-frames X))
-              (as-> X (update-with state X (.getAttributeValue xsr i))))
+              (sink)
+              (as-> X (X state (.getAttributeValue xsr i))))
              state)
          (dec i))))))
 
-(defn end-element-complete*
-  [complete-f, {:keys [stk] :as state}]
+(defn end-element-complete*-
+  [{:keys [stk] :as state} complete-f]
   (let [frame (peek stk)]
     (if-let [ob (:ob frame)]
       (assoc-in state [:stk (dec (count stk)) :ob] (complete-f ob))
       state)))
 
-(defn end-element-assign-ob*
-  [o-p, {:keys [stk rules var-idx] :as state}]
+
+(defn end-element-assign-ob*-+
+  [{:keys [stk] :as state} pp]
+  {:pre [(map? (:sink pp))]}
   (if-let [ob (:ob (peek stk))]
-    (if-let [[o-uks o-uf] (assign-vec rules (pop stk) (peek var-idx) o-p)]
-      (update-in state o-uks o-uf ob)
-      state)
+    (do
+      (if-let [af (:ob (:sink pp))]
+        (af state ob)
+        state))
     state))
 
-(defn end-element-eject-ob*
-  [eject-how, {:keys [stk] :as state}]
+(defn end-element-eject-ob*-
+  [{:keys [stk] :as state} eject-how]
   (if-let [ob (:ob (peek stk))]
     (if ( = true eject-how) 
       (assoc state :eject ob)
@@ -126,18 +102,9 @@
 (defn end-element [state]
   (let [end-el-f (-> state :stk peek :end-element) ]
     (-> state
-        (update-in [:var-idx] pop)
         (cond-> end-el-f (end-el-f))
         (update-in [:stk] pop)
         (update-in [:rtags] pop))))
-
-(defn- analyze-rules-*-number 
-  "Adds :ruleno to each rule, to facilitate identification for random access"
-  [cfg]
-  (update-in 
-   cfg [:rules] (fn [rules] 
-                  (vec
-                   (map-indexed (fn [i rule] (assoc rule :ruleno i)) rules)))))
 
 (defn- analyze-rules-*-compose-end-element
   "Composes an :end-element handler for each rule, except :prune rules"
@@ -146,35 +113,129 @@
    cfg [:rules]
    (fn [rules]
      (mapv (fn [rule] 
-            (if (:prune rule)
-              rule
-              (->> [
-                    ;; Steps for an end-element handler:
+             (if (:prune rule)
+               rule
+               (let [complete-f (some-> (get-in rule [:create :complete-by]) 
+                                        (symbols))
+                     o-p        (get-in rule [:create :assign])
+                     eject-how  (get-in rule [:create :eject])] 
+                 (assoc rule :end-element
+                        (fn [state]
+                          (let [pp ((:path-strategy state) (:rtags state))]
+                            (-> state
+                                (cond-> complete-f 
+                                        (end-element-complete*- complete-f))
+                                (cond-> o-p 
+                                        (end-element-assign-ob*-+ pp))
+                                (cond-> eject-how 
+                                        (end-element-eject-ob*- eject-how))))))))) 
+           rules))))
 
-                    (when-let [complete-f 
-                               (some-> (get-in rule [:create :complete-by])
-                                       (symbols))]
-                      [(partial end-element-complete* complete-f)])
-
-                    (when-let [o-p (get-in rule [:create :assign])]
-                      [(partial end-element-assign-ob* o-p)])
-
-                    (when-let [eject-how (get-in rule [:create :eject])]
-                      [(partial end-element-eject-ob* eject-how)])
-
-                    ]
-                   
-                   (apply concat)
-                   (reverse) ;; because comp runs fns right-to-left
-                   (apply comp)
-                   (assoc rule :end-element)))) 
-          rules))))
-
-(defn stax-nab-text! [{:keys [stk rules var-idx] :as state} t-p]
+(defn stax-nab-text!- [state {:keys [sink] :as pp}]
   (let [^XMLStreamReader xsr (:xsr state) 
-        stuff (.getElementText xsr)
-        [t-uks t-uf] (assign-vec rules stk (peek var-idx) t-p)]
-    (cond-> state t-uks (update-in t-uks t-uf stuff))))
+        af (sink :text)]
+    (cond-> state 
+            af (af (.getElementText xsr)))))
+
+(defn reverse-path-index
+  "Structure for ruleno-from-index to use"
+  [rules]
+  (-> rules
+      (->> (map #(-> % :path (string/split #"/") reverse (concat [:end]))))
+      (zipmap (range))
+      (->> (reduce-kv assoc-in {}))))
+
+(defn ruleno-from-index
+  "Given reverse-path index and a reverse path, trace the path into the
+  index far enough to get an integer. Nil if none."
+  [idx rpath]
+  (when-let [t (first rpath)]
+    (if-let [next-idx (get idx t)]
+      (if-let [deeper-answer (ruleno-from-index next-idx (rest rpath))]
+        deeper-answer
+        (:end next-idx)))))
+
+(defn path-disposal 
+  "Function of rpath that yields a map containing:
+
+  * :rulestk - stack (vector) of indexes into rules of the rule for
+    this path and its ancestors.
+
+  * :var-idx - property-key to rulestk-index map, considering the
+    above rule's props, and all ancestor elements'.
+
+  * :sink - map of attribute name, or :text or :ob, to a fn of state
+    and a value, that either assigns the value to the property or
+    conj's it if the property is a multi, and returns revised state."
+  [rules]
+  (let [rev-idx        (reverse-path-index rules) 
+        assign-targets (prop-targets rules)
+        memo           (atom {})] 
+    (letfn [(updater [rules stk var-idx prop]
+              {:pre [(vector? rules) 
+                     (vector? stk) 
+                     (map? var-idx)
+                     (keyword? prop)]}
+              (when-let [frame-no (var-idx prop)]
+                (let [vruleno (get stk frame-no)
+                      rule   (rules vruleno)
+                      propdef (-> rule :create :props prop)
+                      multi? (:multi propdef)
+                      route [:stk frame-no :ob prop]]
+                  (if multi?
+                    (fn u9 [state v] (update-in state route assign-multi v))
+                    (fn a1 [state v] (assoc-in state route v))))))
+            (new-disposal [rpath]
+              {:post [(vector? (:rulestk %))
+                      (map? (:sink %))]}
+              (if (seq rpath)
+                (let [frameno   (dec (count rpath)) 
+                      parent    (disposal (drop 1 rpath))
+                      p'rulestk (:rulestk parent)
+                      ruleno    (ruleno-from-index rev-idx rpath)
+                      rulestk   (conj p'rulestk ruleno)
+                      rule      (get rules ruleno)
+                      props     (seq (filter assign-targets 
+                                             (-> rule :create :props keys)))
+                      ob-prop   (get-in rule [:create :assign])
+                      up-targets
+                      (->> (cons
+                            ob-prop
+                            (set/difference (rule-attr+text-targets rule)
+                                            (set props)))
+                           (remove nil?))
+                      
+                      t-prop    (-> rule :text-value :assign)
+
+                      up-targets-set (set up-targets)
+                      
+                      p'var-idx (:var-idx parent)
+                      var-idx   (merge p'var-idx
+                                       (zipmap props (repeat frameno)))
+                      
+                      sink (->> (apply concat
+                                       (when ob-prop 
+                                         [[:ob p'var-idx ob-prop]])
+                                       (when t-prop 
+                                         [[:text var-idx t-prop]])
+                                       (for [[att {prop :assign}] (:atts rule)
+                                             :when prop] 
+                                         [[att var-idx prop]]))
+                                (map (fn [[k v p]]
+                                       (when-let 
+                                           [u (updater rules rulestk v p)]
+                                         {k u})))
+                                (apply merge {}))
+                      ]
+                  {:rulestk rulestk, :var-idx var-idx, :sink sink})
+                {:rulestk [], :var-idx {}, :sink {}}))
+            (disposal [rpath]
+              (if-let [ret (@memo rpath)]
+                ret
+                (let [v (new-disposal rpath)]
+                  (swap! memo assoc rpath v)
+                  v)))]
+      disposal)))
 
 (defn- analyze-rules-*-compose-start-element
   "Composes a :start-element handler for each rule"
@@ -185,117 +246,47 @@
      (fn [rules]
        (mapv (fn [rule] 
                (assoc rule :start-element
-                      (let [rule-props-to-index
-                            (when-let [props (-> rule :create :props keys set)]
-                              (seq (set/intersection assign-targets props)))
-                            
-                            external-targets
-                            (->> (concat
-                                  [(get-in rule [:create :assign])]
-                                  (set/difference
-                                   (rule-attr+text-targets rule)
-                                   (set (-> rule :create :props keys))))
-                                 (remove nil?))
-                            
-                            external-targets-set (set external-targets)
-
-                            create (when (:create rule) :create)
-                            atts   (:atts rule)
-                            content (cond 
-                                     (:prune rule)      :prune
-                                     (:text-value rule) :text
-                                     :else              :children) 
-                            ejecting? (-> rule :create :eject)
-                            
+                      (let [atts   (:atts rule)
                             ruleno (:ruleno rule)
-                            end-el-f (:end-element rule)
+                            end-el-f (:end-element rule)]
+                        (cond
+                         (:text-value rule)
+                         (fn [state]
+                           (let [pp ((:path-strategy state) (:rtags state))]
+                             ;; text guarantees no child elts.
+                             ;; Need stk frame only if creating new object.
+                             ;; And then only b/c too confusing otherwise.
+                             ;; There might be atts.
+                             (-> state
+                                 (update-in [:stk] conj 
+                                            {:end-element end-el-f})
+                                 (cond-> atts (start-element-atts*-+ pp))
+                                 (stax-nab-text!- pp)
+                                 (end-element))))
 
-                            t-p (-> rule :text-value :assign)
-                            ]
-                        (when-not (or ejecting?
-                                      (:prune rule) 
-                                      (seq external-targets))
-                          (throw (RuntimeException. 
-                                  (str "This rule targets nothing: " rule))))
-                        (fn [state]
-                          (let [ext-varidx (peek (:var-idx state))]
-                            (condp = content
-                              :text 
-                              (do 
-                                ;; text guarantees no child elts.
-                                ;; Need stk frame only if creating new object.
-                                ;; And then only b/c too confusing otherwise.
-                                ;; There might be atts.
-                                (if rule-props-to-index
-                                  (-> state
-                                      (update-in [:stk] conj 
-                                                 {:ruleno ruleno, 
-                                                  :end-element end-el-f})
-                                      (start-element-vars*- rule-props-to-index)
-                                      (cond-> atts (start-element-atts*- atts))
-                                      (stax-nab-text! t-p)
-                                      (end-element))
-                                  (-> state
-                                      (update-in [:stk] conj 
-                                                 {:ruleno ruleno, 
-                                                  :end-element end-el-f})
-                                      (update-in [:var-idx] conj
-                                                 (or ext-varidx {}))
-                                      (cond-> atts (start-element-atts*- atts))
-                                      (stax-nab-text! t-p)
-                                      (end-element))))
-                              :children 
-                              (do 
-                                (if rule-props-to-index
-                                  (-> state
-                                      (update-in [:stk] conj 
-                                                 {:ruleno ruleno, 
-                                                  :end-element end-el-f})
-                                      (start-element-vars*- rule-props-to-index)
-                                      (cond-> atts (start-element-atts*- atts)))
-                                  (-> state
-                                      (update-in [:stk] conj 
-                                                 {:ruleno ruleno, 
-                                                  :end-element end-el-f})
-                                      (update-in [:var-idx] conj
-                                                 (or ext-varidx {}))
-                                      (cond-> atts 
-                                              (start-element-atts*- atts)))))
-                              :prune
-                              (do
-                                (start-element-pruning* state)))))))) 
+                          (:prune rule)
+                          (fn [state]
+                            (start-element-pruning* state))
+
+                          :else
+                          (fn [state]
+                            (let [pp ((:path-strategy state) (:rtags state))]
+                              (-> state
+                                  (update-in [:stk] conj 
+                                             {:end-element end-el-f})
+                                  (cond-> atts (start-element-atts*-+ pp)))))))))
              rules)))))
 
 (defn analyze-rules-*-reverse-path-index
   [cfg]
-  (assoc cfg :rev-path-to-ruleno
-         (reduce (fn [m {:keys [path ruleno] :as rule}]
-                   (assoc-in m 
-                             (-> path
-                                 (string/split #"/")
-                                 (reverse)
-                                 (concat [:end]))
-                             ruleno))
-                 {}
-                 (:rules cfg))))
+  (assoc cfg :rev-path-to-ruleno (reverse-path-index (:rules cfg))))
 
 (defn analyze-rules
   [rules symbols]
   (->> {:rules rules}
-       (analyze-rules-*-number)
        (analyze-rules-*-compose-end-element symbols)
        (analyze-rules-*-compose-start-element)
        (analyze-rules-*-reverse-path-index)))
-
-(defn ruleno-from-index
-  "Given reverse-path index and a reverse path, trace the path into the
-  index far enough to get an integer. Nil if none."
-  [idx path]
-  (when-let [t (first path)]
-    (if-let [next-idx (get idx t)]
-      (if-let [deeper-answer (ruleno-from-index next-idx (rest path))]
-        deeper-answer
-        (:end next-idx)))))
 
 (defn start-element-rule
   "Identifies rule suitable for state's :rtags. Pushes stack frame."
@@ -304,8 +295,7 @@
     (let [start-el-f (get-in state [:rules ruleno :start-element])]
       (start-el-f state))
     (-> state 
-        (update-in [:stk] conj nil)
-        (start-element-novars*))))
+        (update-in [:stk] conj nil))))
 
 (defn start-element [state]
   (let [^XMLStreamReader xsr (:xsr state)] 
@@ -350,8 +340,8 @@
       (analyze-rules symbols)
       (assoc :rtags '())
       (assoc :stk [])
-      (assoc :var-idx []) ;; stack of hash of var key to stk index
-      (assoc :xsr xsr)))
+      (assoc :xsr xsr)
+      (as-> x (assoc x :path-strategy (path-disposal (:rules x))))))
 
 (defn pull-object
   "Interprets XML stream until an object is ready to eject. Returns a
