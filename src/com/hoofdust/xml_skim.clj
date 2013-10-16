@@ -303,31 +303,6 @@
         (update-in [:rtags] conj (.getLocalName xsr))
         (start-element-rule))))
 
-(defn pull-parse-event-advance
-  "Computes new state, based on old state and event, ejects the
-  object that the event completes (if any), and advances xsr to the
-  next event. Returns new state, or nil if document is over."
-  [state]
-  (let [^XMLStreamReader xsr (:xsr state) 
-        state' (let [e (.getEventType xsr)]
-                 (cond
-                  (= e XMLStreamConstants/END_DOCUMENT)
-                  nil
-                  
-                  (= e XMLStreamConstants/START_ELEMENT)
-                  (start-element state)
-                  
-                  (= e XMLStreamConstants/END_ELEMENT)
-                  (end-element state)
-                  
-                  :else
-                  state))]
-    (when state'
-      (assert (identical? xsr (:xsr state')))
-      (when (.hasNext xsr)
-        (.next xsr)  ;; .nextTag, on endElement, in files with no mixed content, saves a tiny amount of time
-        state'))))
-
 (defn start-pull
   "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
   symbol to function, referred to by rule property complete-by. XSR -
@@ -349,15 +324,27 @@
   pull-object. Returns nil, instead of the vector, when the stream is
   over."
   [state]
-  (loop [state state]
-    (when-let [state' (pull-parse-event-advance state)]
-      (if-let [eject (:eject state')] 
-        (do 
-          (when (:warning-pruned state')
-            (println "Warning: Pruned useless paths: " 
-                     (:warning-pruned state')))
-          [eject (dissoc state' :eject :warning-pruned)])
-        (recur state')))))
+  (let [^XMLStreamReader xsr (:xsr state) ] 
+    (loop [state state]
+      (when-let [state' (let [e (.getEventType xsr)]
+                          (cond
+                           (= e XMLStreamConstants/END_DOCUMENT)
+                           nil
+                           
+                           (= e XMLStreamConstants/START_ELEMENT)
+                           (start-element state)
+                           
+                           (= e XMLStreamConstants/END_ELEMENT)
+                           (end-element state)
+                           
+                           :else
+                           state))]
+        (when (.hasNext xsr)
+          ;; .nextTag, on endElement, in files with no mixed content, saves a tiny amount of time
+          (.next xsr))
+        (if-let [eject (:eject state')] 
+          [eject (dissoc state' :eject)]
+          (recur state'))))))
 
 (defn pull-seq
   "Lazy sequence of objects pulled from the XML stream"
