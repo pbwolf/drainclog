@@ -67,14 +67,13 @@
 ;; is it necessary to assoc this back into the state?
 (defn end-element-complete*-
   [{:keys [stk] :as state} complete-f]
-  (let [frame (peek stk)]
-    (if-let [ob (:ob frame)]
-      (assoc-in state [:stk (dec (count stk)) :ob] (complete-f ob))
-      state)))
+  (if-let [ob (peek stk)]
+    (assoc-in state [:stk (dec (count stk))] (complete-f ob))
+    state))
 
 (defn end-element-assign-ob*-+
   [{:keys [stk] :as state} pp]
-  (if-let [ob (:ob (peek stk))]
+  (if-let [ob (peek stk)]
     (if-let [af (:ob (:sink pp))]
       (af state ob)
       state)
@@ -82,7 +81,7 @@
 
 (defn end-element-eject-ob*-
   [{:keys [stk] :as state} eject-how]
-  (if-let [ob (:ob (peek stk))]
+  (if-let [ob (peek stk)]
     (if ( = true eject-how) 
       (assoc state :eject ob)
       (do (eject-how ob) 
@@ -92,8 +91,7 @@
 (defn end-element [state]
   (let [pp ((:path-strategy state) (:rtags state))
         ruleno (:ruleno pp) 
-        end-el-f #_(cond-> state ruleno :stk peek :end-element) 
-        (when ruleno (get-in state [:rules ruleno :end-element]))]
+        end-el-f (when ruleno (get-in state [:rules ruleno :end-element]))]
     (-> state
         (cond-> end-el-f (end-el-f))
         (cond-> ruleno (update-in [:stk] pop))
@@ -170,7 +168,7 @@
                       rule    (rules vruleno)
                       propdef (-> rule :create :props prop)
                       multi?  (:multi propdef)
-                      route   [:stk frame-no :ob prop]]
+                      route   [:stk frame-no prop]]
                   (if multi?
                     (fn u9 [state v] (update-in state route assign-multi v))
                     (fn a1 [state v] (assoc-in state route v))))))
@@ -235,8 +233,7 @@
        (mapv (fn [rule] 
                (assoc rule :start-element
                       (let [atts   (:atts rule)
-                            ruleno (:ruleno rule)
-                            end-el-f (:end-element rule)]
+                            ruleno (:ruleno rule)]
                         (cond
                          (:text-value rule)
                          (fn [state]
@@ -248,8 +245,7 @@
                              ;; And then only b/c too confusing otherwise.
                              ;; There might be atts.
                              (-> state
-                                 (update-in [:stk] conj 
-                                            {:end-element end-el-f})
+                                 (update-in [:stk] conj nil)
                                  (cond-> atts (start-element-atts*-+ pp))
                                  (cond-> af   (af (.getElementText xsr)))
                                  (end-element))))
@@ -262,8 +258,7 @@
                           (fn [state]
                             (let [pp ((:path-strategy state) (:rtags state))]
                               (-> state
-                                  (update-in [:stk] conj 
-                                             {:end-element end-el-f})
+                                  (update-in [:stk] conj nil)
                                   (cond-> atts (start-element-atts*-+ pp)))))))))
              rules)))))
 
