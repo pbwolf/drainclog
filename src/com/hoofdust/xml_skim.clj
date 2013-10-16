@@ -65,7 +65,7 @@
         end-el-f (when ruleno (get-in state [:rules ruleno :end-element]))]
     (-> state
         (cond-> end-el-f (end-el-f))
-        (cond-> ruleno (update-in [:stk] pop))
+        (cond-> (:ob? pp) (update-in [:stk] pop))
         (update-in [:rtags] pop))))
 
 (defn- analyze-rules-*-compose-end-element
@@ -75,22 +75,27 @@
    cfg [:rules]
    (fn [rules]
      (mapv (fn [rule] 
-             (if (:prune rule)
-               rule
-               (let [complete-f (some-> (get-in rule [:create :complete-by]) 
-                                        (symbols))
-                     eject-how  (get-in rule [:create :eject])] 
-                 (assoc rule :end-element
-                        (fn [state]
-                          (let [pp ((:path-strategy state) (:rtags state))
-                                ob (some-> (peek (:stk state))
-                                           (cond-> complete-f (complete-f)))
-                                af (:ob (:sink pp))]
-                            (-> state
-                                (cond-> ob 
-                                        (-> (cond-> af (af ob))
-                                            (cond-> eject-how 
-                                                    (assoc :eject ob))))))))))) 
+             (let [might-assign? (get-in rule [:create :assign])
+                   eject-how  (get-in rule [:create :eject])]
+               (if (or (:prune rule)
+                       (not (or might-assign? eject-how)))
+                 rule
+                 (let [complete-f (some-> (get-in rule [:create :complete-by]) 
+                                          (symbols))] 
+                   (assoc 
+                       rule :end-element
+                       (fn [state]
+                         (let [ob (some-> (peek (:stk state))
+                                          (cond-> complete-f (complete-f)))
+                               af (when might-assign? 
+                                    ;; TBD why frequently lookup path-strategy?
+                                    (let [pp ((:path-strategy state) (:rtags state))] 
+                                      (:ob (:sink pp))))]
+                           (-> state
+                               (cond-> ob 
+                                       (-> (cond-> af (af ob))
+                                           (cond-> eject-how 
+                                                   (assoc :eject ob)))))))))))) 
            rules))))
 
 (defn reverse-path-index
@@ -153,15 +158,10 @@
                           frameno   (count p'rulestk)
                           rulestk   (conj p'rulestk ruleno)
                           rule      (get rules ruleno)
+                          ob?       (boolean (:create rule))
                           props     (seq (filter assign-targets 
                                                  (-> rule :create :props keys)))
                           ob-prop   (get-in rule [:create :assign])
-                          up-targets
-                          (->> (cons
-                                ob-prop
-                                (set/difference (rule-attr+text-targets rule)
-                                                (set props)))
-                               (remove nil?))
                           
                           t-prop    (-> rule :text-value :assign)
                           
@@ -183,9 +183,10 @@
                                              {k u})))
                                     (apply merge {}))
                           ]
-                      {:ruleno ruleno, :rulestk rulestk, :var-idx var-idx, :sink sink})
-                    (assoc parent :ruleno nil)))
-                {:ruleno nil, :rulestk [], :var-idx {}, :sink {}}))
+                      {:ob? ob?, :ruleno ruleno, 
+                       :rulestk rulestk, :var-idx var-idx, :sink sink})
+                    (assoc parent :ob? nil, :ruleno nil)))
+                {:ob? nil, :ruleno nil, :rulestk [], :var-idx {}, :sink {}}))
             (disposal [rpath]
               (if-let [ret (@memo rpath)]
                 ret
@@ -208,15 +209,16 @@
                         (cond
                          (:text-value rule)
                          (fn [state]
-                           (let [pp ((:path-strategy state) (:rtags state))
-                                 af (-> pp :sink :text)
+                           (let [pp  ((:path-strategy state) (:rtags state))
+                                 af  (-> pp :sink :text)
+                                 ob? (:ob? pp)
                                  ^XMLStreamReader xsr (:xsr state) ]
                              ;; text guarantees no child elts.
                              ;; Need stk frame only if creating new object.
                              ;; And then only b/c too confusing otherwise.
                              ;; There might be atts.
                              (-> state
-                                 (update-in [:stk] conj nil)
+                                 (cond-> ob?  (update-in [:stk] conj nil))
                                  (cond-> atts (start-element-atts*-+ pp))
                                  (cond-> af   (af (.getElementText xsr)))
                                  (end-element))))
@@ -227,9 +229,10 @@
 
                           :else
                           (fn [state]
-                            (let [pp ((:path-strategy state) (:rtags state))]
+                            (let [pp ((:path-strategy state) (:rtags state))
+                                  ob? (:ob? pp)]
                               (-> state
-                                  (update-in [:stk] conj nil)
+                                  (cond-> ob?  (update-in [:stk] conj nil))
                                   (cond-> atts (start-element-atts*-+ pp)))))))))
              rules)))))
 
