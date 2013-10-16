@@ -23,14 +23,9 @@
                           ~@(for [a (-> rule :atts keys)] [:atts a])]]
                  (get-in rule `[~@kk :assign])))))
 
-;; is this better/worse/same as (fnil conj [])
 (defn- assign-multi [c v]
+  "assign-multi replaces the slower (fnil conj [])"
   (conj (or c []) v))
-
-;; Here are some composable aspects of start-element and end-element handlers.  
-;; The rule analyzer includes aspects required by the rules.
-;; The start-element handler may prescribe a nested event loop,
-;; so predeclare the event loops:
 
 (defn start-element-pruning*
   [state]
@@ -64,30 +59,6 @@
              state)
          (dec i))))))
 
-;; is it necessary to assoc this back into the state?
-(defn end-element-complete*-
-  [{:keys [stk] :as state} complete-f]
-  (if-let [ob (peek stk)]
-    (assoc-in state [:stk (dec (count stk))] (complete-f ob))
-    state))
-
-(defn end-element-assign-ob*-+
-  [{:keys [stk] :as state} pp]
-  (if-let [ob (peek stk)]
-    (if-let [af (:ob (:sink pp))]
-      (af state ob)
-      state)
-    state))
-
-(defn end-element-eject-ob*-
-  [{:keys [stk] :as state} eject-how]
-  (if-let [ob (peek stk)]
-    (if ( = true eject-how) 
-      (assoc state :eject ob)
-      (do (eject-how ob) 
-          state))
-    state))
-
 (defn end-element [state]
   (let [pp ((:path-strategy state) (:rtags state))
         ruleno (:ruleno pp) 
@@ -108,18 +79,18 @@
                rule
                (let [complete-f (some-> (get-in rule [:create :complete-by]) 
                                         (symbols))
-                     o-p        (get-in rule [:create :assign])
                      eject-how  (get-in rule [:create :eject])] 
                  (assoc rule :end-element
                         (fn [state]
-                          (let [pp ((:path-strategy state) (:rtags state))]
+                          (let [pp ((:path-strategy state) (:rtags state))
+                                ob (some-> (peek (:stk state))
+                                           (cond-> complete-f (complete-f)))
+                                af (:ob (:sink pp))]
                             (-> state
-                                (cond-> complete-f 
-                                        (end-element-complete*- complete-f))
-                                (cond-> o-p 
-                                        (end-element-assign-ob*-+ pp))
-                                (cond-> eject-how 
-                                        (end-element-eject-ob*- eject-how))))))))) 
+                                (cond-> ob 
+                                        (-> (cond-> af (af ob))
+                                            (cond-> eject-how 
+                                                    (assoc :eject ob))))))))))) 
            rules))))
 
 (defn reverse-path-index
