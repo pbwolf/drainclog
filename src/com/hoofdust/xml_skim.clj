@@ -46,21 +46,20 @@
       (update-in [:rtags] pop)))
 
 (defn start-element-atts*-+
-  [state {:keys [sink] :as pp}]
-  (let [^XMLStreamReader xsr (:xsr state)]
-    (loop [state state, i (dec (.getAttributeCount xsr))]
-      (if (neg? i)
-        state
-        (recur 
-         (or (some-> 
-              (.getAttributeLocalName xsr i)
-              (sink)
-              (as-> X (X state (.getAttributeValue xsr i))))
-             state)
-         (dec i))))))
+  [state {:keys [sink] :as pp} ^XMLStreamReader xsr]
+  (loop [state state, i (dec (.getAttributeCount xsr))]
+    (if (neg? i)
+      state
+      (recur 
+       (or (some-> 
+            (.getAttributeLocalName xsr i)
+            (sink)
+            (as-> X (X state (.getAttributeValue xsr i))))
+           state)
+       (dec i)))))
 
-(defn end-element [state]
-  (let [pp ((:path-strategy state) (:rtags state))
+(defn end-element [state pp]
+  (let [;;pp ((:path-strategy state) (:rtags state))
         ruleno (:ruleno pp) 
         end-el-f (when ruleno (get-in state [:rules ruleno :end-element]))]
     (-> state
@@ -207,45 +206,47 @@
                       (let [atts   (:atts rule)
                             ruleno (:ruleno rule)]
                         (cond
-                         (:text-value rule)
-                         (fn [state]
-                           (let [pp  ((:path-strategy state) (:rtags state))
-                                 af  (-> pp :sink :text)
-                                 ob? (:ob? pp)
-                                 ^XMLStreamReader xsr (:xsr state) ]
-                             ;; text guarantees no child elts.
-                             ;; Need stk frame only if creating new object.
-                             ;; And then only b/c too confusing otherwise.
-                             ;; There might be atts.
+                         (and (:text-value rule) (:create rule))
+                         (fn [state pp ^XMLStreamReader xsr]
+                           (let [af  (-> pp :sink :text)]
                              (-> state
-                                 (cond-> ob?  (update-in [:stk] conj nil))
-                                 (cond-> atts (start-element-atts*-+ pp))
+                                 (update-in [:stk] conj nil)
+                                 (cond-> atts (start-element-atts*-+ pp xsr))
                                  (cond-> af   (af (.getElementText xsr)))
-                                 (end-element))))
+                                 (end-element pp))))
+
+                         (and (:text-value rule) (not (:create rule)))
+                         (fn [state pp ^XMLStreamReader xsr]
+                           (let [af  (-> pp :sink :text)]
+                             (-> state
+                                 (cond-> atts (start-element-atts*-+ pp xsr))
+                                 (cond-> af   (af (.getElementText xsr)))
+                                 (end-element pp))))
 
                           (:prune rule)
-                          (fn [state]
+                          (fn [state pp ^XMLStreamReader xsr]
                             (start-element-pruning* state))
 
+                          (:create rule)
+                          (fn [state pp ^XMLStreamReader xsr]
+                            (-> state
+                                (update-in [:stk] conj nil)
+                                (cond-> atts (start-element-atts*-+ pp xsr))))
+
+                          atts
+                          (fn [state pp ^XMLStreamReader xsr]
+                            (-> state
+                                (start-element-atts*-+ pp xsr)))
+
                           :else
-                          (fn [state]
-                            (let [pp ((:path-strategy state) (:rtags state))
-                                  ob? (:ob? pp)]
-                              (-> state
-                                  (cond-> ob?  (update-in [:stk] conj nil))
-                                  (cond-> atts (start-element-atts*-+ pp)))))))))
+                          nil))))
              rules)))))
 
-(defn analyze-rules-*-reverse-path-index
-  [cfg]
-  (assoc cfg :rev-path-to-ruleno (reverse-path-index (:rules cfg))))
-
 (defn analyze-rules
-  [rules symbols]
-  (->> {:rules rules}
+  [cfg symbols]
+  (->> cfg
        (analyze-rules-*-compose-end-element symbols)
-       (analyze-rules-*-compose-start-element)
-       (analyze-rules-*-reverse-path-index)))
+       (analyze-rules-*-compose-start-element)))
 
 (defn start-element [{:keys [path-strategy rules] :as state}]
   (let [^XMLStreamReader xsr (:xsr state)
@@ -256,7 +257,7 @@
                         (:start-element))] 
     (-> state 
         (assoc :rtags rtags')
-        (cond-> start-f (start-f)))))
+        (cond-> start-f (start-f pp xsr)))))
 
 (defn start-pull
   "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
@@ -266,12 +267,9 @@
   ;; Note: Tried keeping keywords, not strings, in :rtags, but,
   ;; VisualVM said Symbol.intern was spending lots of time, and, sure
   ;; enough, the program got faster after abandoning keywordization.
-  (-> rules 
-      (analyze-rules symbols)
-      (assoc :rtags '())
-      (assoc :stk [])
-      (assoc :xsr xsr)
-      (as-> x (assoc x :path-strategy (path-disposal (:rules x))))))
+  (-> {:rules rules :rtags '() :stk [] :xsr xsr
+       :path-strategy (path-disposal rules)}
+      (analyze-rules symbols)))
 
 (defn pull-object
   "Interprets XML stream until an object is ready to eject. Returns a
@@ -293,7 +291,8 @@
            (recur state'))
          
          2 ;; XMLStreamConstants/END_ELEMENT
-         (let [state' (end-element state)]
+         (let [state' (end-element state 
+                                   ((:path-strategy state) (:rtags state)))]
            (when (.hasNext xsr)
              (.next xsr))
            (if-let [eject (:eject state')] 
