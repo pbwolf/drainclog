@@ -37,13 +37,12 @@
        (recur (inc levels), (.next xsr))
 
        (= e XMLStreamConstants/END_ELEMENT)
-       (when ( < 0 levels)
-         (recur (dec levels) (.next xsr))) ;; nextTag does not save time
+       (if ( < 0 levels)
+         (recur (dec levels) (.next xsr))
+         state) 
        
        :else
-       (recur levels (.next xsr)))))
-  (-> state
-      (update-in [:rtags] pop)))
+       (recur levels (.next xsr))))))
 
 (defn start-element-atts*-+
   [state {:keys [sink] :as pp} ^XMLStreamReader xsr]
@@ -59,13 +58,11 @@
        (dec i)))))
 
 (defn end-element [state pp]
-  (let [;;pp ((:path-strategy state) (:rtags state))
-        ruleno (:ruleno pp) 
+  (let [ruleno (:ruleno pp) 
         end-el-f (when ruleno (get-in state [:rules ruleno :end-element]))]
     (-> state
-        (cond-> end-el-f (end-el-f))
-        (cond-> (:ob? pp) (update-in [:stk] pop))
-        (update-in [:rtags] pop))))
+        (cond-> end-el-f (end-el-f pp))
+        (cond-> (:ob? pp) (update-in [:stk] pop)))))
 
 (defn- analyze-rules-*-compose-end-element
   "Composes an :end-element handler for each rule, except :prune rules"
@@ -83,13 +80,11 @@
                                           (symbols))] 
                    (assoc 
                        rule :end-element
-                       (fn [state]
+                       (fn [state pp]
                          (let [ob (some-> (peek (:stk state))
                                           (cond-> complete-f (complete-f)))
                                af (when might-assign? 
-                                    ;; TBD why frequently lookup path-strategy?
-                                    (let [pp ((:path-strategy state) (:rtags state))] 
-                                      (:ob (:sink pp))))]
+                                    (:ob (:sink pp)))]
                            (-> state
                                (cond-> ob 
                                        (-> (cond-> af (af ob))
@@ -123,6 +118,11 @@
   * :rulestk - stack (vector) of indexes into rules of the rule for
     this path and its ancestors.
 
+  * :ob? - whether this rule creates an object.
+
+  * :start-consumes-end? - whether the start-element handler consumes
+    the end-element event too (and everything in between).
+
   * :var-idx - property-key to rulestk-index map, considering the
     above rule's props, and all ancestor elements'.
 
@@ -134,10 +134,6 @@
         assign-targets (prop-targets rules)
         memo           (atom {})] 
     (letfn [(updater [rules stk var-idx prop]
-              {:pre [(vector? rules) 
-                     (vector? stk) 
-                     (map? var-idx)
-                     (keyword? prop)]}
               (when-let [frame-no (var-idx prop)]
                 (let [vruleno (get stk frame-no)
                       rule    (rules vruleno)
@@ -168,6 +164,9 @@
                           var-idx   (merge p'var-idx
                                            (zipmap props (repeat frameno)))
                           
+                          start-consumes-end? 
+                                    (or (:prune rule) (:text-value rule))
+
                           sink (->> (apply concat
                                            (when ob-prop 
                                              [[:ob p'var-idx ob-prop]])
@@ -183,9 +182,12 @@
                                     (apply merge {}))
                           ]
                       {:ob? ob?, :ruleno ruleno, 
+                       :start-consumes-end? start-consumes-end?,
                        :rulestk rulestk, :var-idx var-idx, :sink sink})
-                    (assoc parent :ob? nil, :ruleno nil)))
-                {:ob? nil, :ruleno nil, :rulestk [], :var-idx {}, :sink {}}))
+                    (assoc parent :ob? nil, :ruleno nil, 
+                           :start-consumes-end? nil)))
+                {:ob? nil, :ruleno nil, :start-consumes-end? nil, 
+                 :rulestk [], :var-idx {}, :sink {}}))
             (disposal [rpath]
               (if-let [ret (@memo rpath)]
                 ret
@@ -220,26 +222,25 @@
                            (let [af  (-> pp :sink :text)]
                              (-> state
                                  (cond-> atts (start-element-atts*-+ pp xsr))
-                                 (cond-> af   (af (.getElementText xsr)))
-                                 (end-element pp))))
+                                 (cond-> af   (af (.getElementText xsr))))))
 
-                          (:prune rule)
-                          (fn [state pp ^XMLStreamReader xsr]
-                            (start-element-pruning* state))
-
-                          (:create rule)
-                          (fn [state pp ^XMLStreamReader xsr]
-                            (-> state
-                                (update-in [:stk] conj nil)
-                                (cond-> atts (start-element-atts*-+ pp xsr))))
-
-                          atts
-                          (fn [state pp ^XMLStreamReader xsr]
-                            (-> state
-                                (start-element-atts*-+ pp xsr)))
-
-                          :else
-                          nil))))
+                         (:prune rule)
+                         (fn [state pp ^XMLStreamReader xsr]
+                           (start-element-pruning* state))
+                         
+                         (:create rule)
+                         (fn [state pp ^XMLStreamReader xsr]
+                           (-> state
+                               (update-in [:stk] conj nil)
+                               (cond-> atts (start-element-atts*-+ pp xsr))))
+                         
+                         atts
+                         (fn [state pp ^XMLStreamReader xsr]
+                             (-> state
+                                 (start-element-atts*-+ pp xsr)))
+                         
+                         :else
+                         nil))))
              rules)))))
 
 (defn analyze-rules
@@ -248,16 +249,12 @@
        (analyze-rules-*-compose-end-element symbols)
        (analyze-rules-*-compose-start-element)))
 
-(defn start-element [{:keys [path-strategy rules] :as state}]
+(defn start-element [{:keys [rules] :as state} pp]
   (let [^XMLStreamReader xsr (:xsr state)
-        rtags'  (conj (:rtags state) (.getLocalName xsr))
-        pp      (path-strategy rtags')
         start-f (some-> (:ruleno pp)
                         (rules)
                         (:start-element))] 
-    (-> state 
-        (assoc :rtags rtags')
-        (cond-> start-f (start-f pp xsr)))))
+    (cond-> state start-f (start-f pp xsr))))
 
 (defn start-pull
   "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
@@ -277,33 +274,39 @@
   pull-object. Returns nil, instead of the vector, when the stream is
   over."
   [state]
-  (let [^XMLStreamReader xsr (:xsr state) ] 
-    (loop [state state]
+  (let [^XMLStreamReader xsr (:xsr state) 
+        pstrategy (:path-strategy state)] 
+    (loop [state state rtags (:rtags state)]
       (let [e (.getEventType xsr)]
         (case e
          8 ;; XMLStreamConstants/END_DOCUMENT
          nil
          
          1 ;; XMLStreamConstants/START_ELEMENT
-         (let [state' (start-element state)]
+         (let [rtags' (conj rtags (.getLocalName xsr))
+               ;;_ (println "For start-element, rtags will be" rtags')
+               pp     (pstrategy rtags')
+               state' (start-element state pp)]
            (when (.hasNext xsr)
              (.next xsr))
-           (recur state'))
+           (recur state' (if (:start-consumes-end? pp) rtags rtags')))
          
          2 ;; XMLStreamConstants/END_ELEMENT
-         (let [state' (end-element state 
-                                   ((:path-strategy state) (:rtags state)))]
+         (let [state' (end-element state (pstrategy rtags))
+               rtags' (pop rtags)]
            (when (.hasNext xsr)
              (.next xsr))
            (if-let [eject (:eject state')] 
-             [eject (dissoc state' :eject)]
-             (recur state')))
+             [eject (-> state'
+                        (dissoc :eject)
+                        (assoc :rtags rtags'))]
+             (recur state' rtags')))
          
          ;; else
          (do
            (when (.hasNext xsr)
             (.next xsr))
-           (recur state)))))))
+           (recur state rtags)))))))
 
 (defn pull-seq
   "Lazy sequence of objects pulled from the XML stream"
