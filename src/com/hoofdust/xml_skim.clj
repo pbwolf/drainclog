@@ -1,40 +1,10 @@
 (ns com.hoofdust.xml-skim
-  "Reads XML, described by rules, into structures"
-  (:import [javax.xml.stream XMLStreamConstants XMLStreamReader])
+  "Reads XML, described by a configuration of rules, into map
+  structures. The main fn is pull-seq."
+  (:import [javax.xml.stream 
+            XMLStreamConstants XMLStreamReader])
   (:require [clojure.set :as set] 
             [clojure.string :as string]))
-
-(defn prop-targets 
-  "Set of :assign targets within a :text-value, :create, or attribute"
-  [rules]
-  (set (remove nil?
-               (for [rule rules, 
-                     kk `[[:create] 
-                          [:text-value] 
-                          ~@(for [a (-> rule :atts keys)] [:atts a])]]
-                 (get-in rule `[~@kk :assign])))))
-
-(defn- assign-multi [c v]
-  "assign-multi replaces the slower (fnil conj [])"
-  (conj (or c []) v))
-
-(defn burn-stax
-  "With the XMLStreamReader initially parked at a start-element event,
-  consume events until it is parked at the corresponding end-element.
-  Returns nil."
-  [^XMLStreamReader xsr]
-  (.next xsr)
-  (loop [levels 0, e (.getEventType xsr)]
-    (cond
-     (= e XMLStreamConstants/START_ELEMENT)
-     (recur (inc levels), (.next xsr))
-
-     (= e XMLStreamConstants/END_ELEMENT)
-     (when ( < 0 levels)
-       (recur (dec levels) (.next xsr))) 
-     
-     :else
-     (recur levels (.next xsr)))))
 
 (defn assign-atts
   "Given a state accumulator, an XMLStreamReader that is positioned at
@@ -54,7 +24,9 @@
            state)
        (dec i)))))
 
-(defn end-element [state pp]
+(defn end-element 
+  "Handler for end-element events"
+  [state pp]
   (let [ruleno (:ruleno pp) 
         end-el-f (when ruleno (get-in state [:rules ruleno :end-element]))]
     (cond-> state end-el-f (end-el-f pp))))
@@ -87,6 +59,16 @@
                                (update-in [:stk] pop))))))))) 
            rules))))
 
+(defn prop-targets 
+  "Set of :assign targets within a :text-value, :create, or attribute"
+  [rules]
+  (set (remove nil?
+               (for [rule rules, 
+                     kk `[[:create] 
+                          [:text-value] 
+                          ~@(for [a (-> rule :atts keys)] [:atts a])]]
+                 (get-in rule `[~@kk :assign])))))
+
 (defn reverse-path-index
   "Structure for ruleno-from-index to use"
   [rules]
@@ -104,6 +86,10 @@
       (if-let [deeper-answer (ruleno-from-index next-idx (rest rpath))]
         deeper-answer
         (:end next-idx)))))
+
+(defn- assign-multi [c v]
+  "assign-multi replaces the slower (fnil conj [])"
+  (conj (or c []) v))
 
 (defn path-disposal 
   "Function of rpath that yields a map containing:
@@ -191,6 +177,24 @@
                   v)))]
       disposal)))
 
+(defn burn-stax
+  "With the XMLStreamReader initially parked at a start-element event,
+  consume events until it is parked at the corresponding end-element.
+  Returns nil."
+  [^XMLStreamReader xsr]
+  (.next xsr)
+  (loop [levels 0, e (.getEventType xsr)]
+    (cond
+     (= e XMLStreamConstants/START_ELEMENT)
+     (recur (inc levels), (.next xsr))
+
+     (= e XMLStreamConstants/END_ELEMENT)
+     (when ( < 0 levels)
+       (recur (dec levels) (.next xsr))) 
+     
+     :else
+     (recur levels (.next xsr)))))
+
 (defn- analyze-rules-*-compose-start-element
   "Composes a :start-element handler for each rule"
   [cfg]
@@ -241,12 +245,15 @@
              rules)))))
 
 (defn analyze-rules
+  "Studies rules and prepares indexes for speedy handling of StAX events."
   [cfg symbols]
   (->> cfg
        (analyze-rules-*-compose-end-element symbols)
        (analyze-rules-*-compose-start-element)))
 
-(defn start-element [{:keys [rules] :as state} pp]
+(defn start-element 
+  "Handler for start-element events"
+  [{:keys [rules] :as state} pp]
   (let [^XMLStreamReader xsr (:xsr state)
         start-f (some-> (:ruleno pp)
                         (rules)
@@ -255,8 +262,7 @@
 
 (defn start-pull
   "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
-  symbol to function, referred to by rule property complete-by. XSR -
-  XmlStreamReader."
+  symbol to function, referred to by rule property complete-by."
   [rules symbols ^XMLStreamReader xsr]
   ;; Note: Tried keeping keywords, not strings, in :rtags, but,
   ;; VisualVM said Symbol.intern was spending lots of time, and, sure
@@ -266,7 +272,7 @@
       (analyze-rules symbols)))
 
 (defn pull-object
-  "Interprets XML stream until an object is ready to eject. Returns a
+  "Interprets XML stream until an object is complete. Returns a
   vector containing the object and the state with which next to call
   pull-object. Returns nil, instead of the vector, when the stream is
   over."
@@ -275,6 +281,12 @@
         pstrategy (:path-strategy state)] 
     (loop [state state rtags (:rtags state)]
       (let [e (.getEventType xsr)]
+        ;; It seemed that 'case' with constants ran a tiny bit faster
+        ;; than 'cond' with symbols.  Not worth it, I guess.
+
+        ;; You might factor out the when-hasNext-next, but if you
+        ;; consequently factor out the conditional eject and apply it
+        ;; to events of all types, everything gets slower.
         (case e
          8 ;; XMLStreamConstants/END_DOCUMENT
          nil
@@ -305,10 +317,12 @@
            (recur state rtags)))))))
 
 (defn pull-seq
-  "Lazy sequence of objects pulled from the XML stream"
+  "Lazy sequence of objects pulled from the XML stream. Rules -
+  structure as illustrated in doc/sample_configuration.clj. Symbols -
+  map of symbol (used in the rule property, complete-by) to function."
   [rules symbols ^XMLStreamReader xsr]
-  (letfn [(pull-seq* [state]
+  (letfn [(thatch-hedge [state]
             (lazy-seq 
              (when-let [[ob state'] (pull-object state)]
-               (cons ob (pull-seq* state')))))]
-    (pull-seq* (start-pull rules symbols xsr))))
+               (cons ob (thatch-hedge state')))))]
+    (thatch-hedge (start-pull rules symbols xsr))))
