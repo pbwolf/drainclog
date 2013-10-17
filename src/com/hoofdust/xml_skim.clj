@@ -1,8 +1,7 @@
 (ns com.hoofdust.xml-skim
   "Reads XML, described by rules, into structures"
   (:import [javax.xml.stream XMLStreamConstants XMLStreamReader])
-  (:require [clojure.pprint :refer [pprint]] 
-            [clojure.set :as set] 
+  (:require [clojure.set :as set] 
             [clojure.string :as string]))
 
 (defn prop-targets 
@@ -15,37 +14,35 @@
                           ~@(for [a (-> rule :atts keys)] [:atts a])]]
                  (get-in rule `[~@kk :assign])))))
 
-(defn rule-attr+text-targets 
-  "For one rule, the set of :assign targets within a :text-value or attribute"
-  [rule]
-  (set (remove nil?
-               (for [kk `[[:text-value] 
-                          ~@(for [a (-> rule :atts keys)] [:atts a])]]
-                 (get-in rule `[~@kk :assign])))))
-
 (defn- assign-multi [c v]
   "assign-multi replaces the slower (fnil conj [])"
   (conj (or c []) v))
 
-(defn start-element-pruning*
-  [state]
-  (let [^XMLStreamReader xsr (:xsr state)]
-    (.next xsr)
-    (loop [levels 0, e (.getEventType xsr)]
-      (cond
-       (= e XMLStreamConstants/START_ELEMENT)
-       (recur (inc levels), (.next xsr))
+(defn burn-stax
+  "With the XMLStreamReader initially parked at a start-element event,
+  consume events until it is parked at the corresponding end-element.
+  Returns nil."
+  [^XMLStreamReader xsr]
+  (.next xsr)
+  (loop [levels 0, e (.getEventType xsr)]
+    (cond
+     (= e XMLStreamConstants/START_ELEMENT)
+     (recur (inc levels), (.next xsr))
 
-       (= e XMLStreamConstants/END_ELEMENT)
-       (if ( < 0 levels)
-         (recur (dec levels) (.next xsr))
-         state) 
-       
-       :else
-       (recur levels (.next xsr))))))
+     (= e XMLStreamConstants/END_ELEMENT)
+     (when ( < 0 levels)
+       (recur (dec levels) (.next xsr))) 
+     
+     :else
+     (recur levels (.next xsr)))))
 
-(defn start-element-atts*-+
-  [state {:keys [sink] :as pp} ^XMLStreamReader xsr]
+(defn assign-atts
+  "Given a state accumulator, an XMLStreamReader that is positioned at
+  a start-element that might have attributes, and a map of
+  attribute-name to fn of state accumulator and new value, thread the
+  state accumulator through the fns for the element's actual
+  attribute values."
+  [state, sink, ^XMLStreamReader xsr]
   (loop [state state, i (dec (.getAttributeCount xsr))]
     (if (neg? i)
       state
@@ -60,9 +57,7 @@
 (defn end-element [state pp]
   (let [ruleno (:ruleno pp) 
         end-el-f (when ruleno (get-in state [:rules ruleno :end-element]))]
-    (-> state
-        (cond-> end-el-f (end-el-f pp))
-        (cond-> (:ob? pp) (update-in [:stk] pop)))))
+    (cond-> state end-el-f (end-el-f pp))))
 
 (defn- analyze-rules-*-compose-end-element
   "Composes an :end-element handler for each rule, except :prune rules"
@@ -72,9 +67,8 @@
    (fn [rules]
      (mapv (fn [rule] 
              (let [might-assign? (get-in rule [:create :assign])
-                   eject-how  (get-in rule [:create :eject])]
-               (if (or (:prune rule)
-                       (not (or might-assign? eject-how)))
+                   eject-how     (get-in rule [:create :eject])]
+               (if (or (:prune rule) (not (or might-assign? eject-how)))
                  rule
                  (let [complete-f (some-> (get-in rule [:create :complete-by]) 
                                           (symbols))] 
@@ -89,7 +83,8 @@
                                (cond-> ob 
                                        (-> (cond-> af (af ob))
                                            (cond-> eject-how 
-                                                   (assoc :eject ob)))))))))))) 
+                                                   (assoc :eject ob))))
+                               (update-in [:stk] pop))))))))) 
            rules))))
 
 (defn reverse-path-index
@@ -210,34 +205,36 @@
                         (cond
                          (and (:text-value rule) (:create rule))
                          (fn [state pp ^XMLStreamReader xsr]
-                           (let [af  (-> pp :sink :text)]
+                           (let [sink (:sink pp) 
+                                 af   (:text sink)]
                              (-> state
                                  (update-in [:stk] conj nil)
-                                 (cond-> atts (start-element-atts*-+ pp xsr))
+                                 (cond-> atts (assign-atts sink xsr))
                                  (cond-> af   (af (.getElementText xsr)))
                                  (end-element pp))))
 
                          (and (:text-value rule) (not (:create rule)))
                          (fn [state pp ^XMLStreamReader xsr]
-                           (let [af  (-> pp :sink :text)]
+                           (let [sink (:sink pp) 
+                                 af   (:text sink)]
                              (-> state
-                                 (cond-> atts (start-element-atts*-+ pp xsr))
+                                 (cond-> atts (assign-atts sink xsr))
                                  (cond-> af   (af (.getElementText xsr))))))
 
                          (:prune rule)
                          (fn [state pp ^XMLStreamReader xsr]
-                           (start-element-pruning* state))
+                           (burn-stax xsr)
+                           state)
                          
                          (:create rule)
                          (fn [state pp ^XMLStreamReader xsr]
                            (-> state
                                (update-in [:stk] conj nil)
-                               (cond-> atts (start-element-atts*-+ pp xsr))))
+                               (cond-> atts (assign-atts (:sink pp) xsr))))
                          
                          atts
                          (fn [state pp ^XMLStreamReader xsr]
-                             (-> state
-                                 (start-element-atts*-+ pp xsr)))
+                           (assign-atts state (:sink pp) xsr))
                          
                          :else
                          nil))))
@@ -284,7 +281,6 @@
          
          1 ;; XMLStreamConstants/START_ELEMENT
          (let [rtags' (conj rtags (.getLocalName xsr))
-               ;;_ (println "For start-element, rtags will be" rtags')
                pp     (pstrategy rtags')
                state' (start-element state pp)]
            (when (.hasNext xsr)
