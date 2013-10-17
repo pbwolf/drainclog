@@ -1,55 +1,55 @@
 # xml-skim
 
-xml-skim wrings a lazy sequence of just-the-facts Clojure data
-structures (maps!) from an XML stream, by plucking information
-selectively from Java StAX events.
+xml-skim plucks small facts from large XML files read with StAX.
 
-xml-skim is particularly meant for use with large-ish data files
-containing a series of independent sections, stuffed mostly with
-irrelevant clutter but with some arbitrarily-deeply nested elements
-that are worthy of harvest.  These elements are identifiable by their
-tag name alone, or by a "path" of tag names leading down from a
-distinguishing ancestor element.
+The aim of this bike-shed hobby project was to make a macro that would
+turn the configuration file into a smoking-fast loop.  But before we
+wrote the macro to write the program, we figured we would write the
+program itself, just to see what it might look like.  At this rate, we
+might never get around to the macro after all. 
 
-xml-skim is an alternative to sectioning an XML document until it fits
-in memory, then parsing it with `clojure.xml`, then reworking the
-XML data representation into data structures that make sense for
-processing.
-
-Unlike clojure.xml, xml-skim yields no data by default.  Only when 
-the configuration says to make data does it gather data.
+xml-skim accumulates Clojure maps (of further maps, scalars, and
+vectors) of the content of elements with certain tag names, and ejects
+the accumulated maps to a lazy sequence.
 
 ## Configuration
 
 The configuration describes (a) the file and (b) the resulting data
-structures.  See `doc/sample_declaration.clj`.
+structures.  See `doc/sample_configuration.clj`.
 
-The configuration is pure data.  It could be serialized as EDN, read
-from a resource, or constructed dynamically.  The configuration refers
-via symbol to optional functions (particularly, to "complete"
-structures populated in xml-skim's one-size-fits-all way).  The
-program supplies a map of symbol to actual function.
+To the extent the configuration can be customzed with functions, it
+refers by symbol to functions the program defines elsewhere and
+provides in a symbol-to-function map.
 
 ## Algorithm
 
-xml-skim reads the file forward-only.  It retains nothing but a
-running tag path and the under-construction data structures ordained
-by the configuration.
+StAX reads the file in a forward-only fashion.  xml-skim retains
+nothing but a running tag path and the under-construction data
+structures ordained by the configuration.
 
-xml-skim composes StAX event loops and start-element and end-element
-handlers from the declaration.
+xml-skim composes or selects start-element and end-element handlers
+based on the configuration.  The configuration falls short of a
+schema, so xml-skim computes some stuff as it reads the file.  It
+caches these computations by tag-path.
 
-We use the tag-path *tail* because the *leaf* element is often a
-sufficient basis for selecting a processing rule, and when it's not,
-often the leaf and its immediate parent suffice.  
+The configuration states tag-path tails (as opposed to whole paths)
+because, while XML instances may be infinitely perverse, the
+less-perverse ones use distinctive tag names at the more deeply nested
+levels.  The document element, by contrast, is the same for all paths
+in an XML instance.
 
 ## Non-features
 
 * Mixed content
 * XML namespaces
-* XPath-like "//" (elasticity)
-* CSS-like "[@...]" (attribute conditions)
+* XPath-like "//" (elasticity) in configuration rules
+* CSS-like "[@...]" (attribute conditions) in configuration rules
 * SAX adapter (allowing a filter between the file and xml-skim)
+
+## Dedication
+
+The author thanks the Republican Party for the time to devote to this
+hobby project.
 
 ## License
 
