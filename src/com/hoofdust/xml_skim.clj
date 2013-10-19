@@ -25,41 +25,6 @@
            state)
        (dec i)))))
 
-(defn end-element 
-  "Handler for end-element events"
-  [state pp]
-  (let [ruleno (:ruleno pp) 
-        end-el-f (when ruleno (get-in state [:rules ruleno :end-element]))]
-    (cond-> state end-el-f (end-el-f pp))))
-
-(defn- analyze-rules-*-compose-end-element
-  "Composes an :end-element handler for each rule, except :prune rules"
-  [symbols cfg]
-  (update-in 
-   cfg [:rules]
-   (fn [rules]
-     (mapv (fn [rule] 
-             (let [might-assign? (get-in rule [:create :assign])
-                   eject-how     (get-in rule [:create :eject])]
-               (if (or (:prune rule) (not (or might-assign? eject-how)))
-                 rule
-                 (let [complete-f (some-> (get-in rule [:create :complete-by]) 
-                                          (symbols))] 
-                   (assoc 
-                       rule :end-element
-                       (fn [state pp]
-                         (let [ob (some-> (peek (:stk state))
-                                          (cond-> complete-f (complete-f)))
-                               af (when might-assign? 
-                                    (:ob (:sink pp)))]
-                           (-> state
-                               (cond-> ob 
-                                       (-> (cond-> af (af ob))
-                                           (cond-> eject-how 
-                                                   (assoc :eject ob))))
-                               (update-in [:stk] pop))))))))) 
-           rules))))
-
 (defn prop-targets 
   "Set of :assign targets within a :text-value, :create, or attribute"
   [rules]
@@ -119,6 +84,75 @@
     (.next xsr) 
     state))
 
+(defn end-element-f
+  [symbols rules pp]
+  (let [rule (get rules (:ruleno pp) nil)
+        criteria [(when (:create rule) 
+                    :create) 
+                  (when-let [f (some-> (get-in rule [:create :complete-by]) 
+                                       (symbols))]
+                    [f])
+                  (when-let [s (get-in pp [:sink :ob])]
+                    [s])
+                  (when-let [e (get-in rule [:create :eject])]
+                    [e])]]
+    (match/match 
+     criteria
+
+     [nil _ _ _]
+     (fn [state]
+       state)
+
+     [:create _ nil nil]
+     (fn [state]
+       (-> state
+           (update-in [:stk] pop)))
+     
+     [:create nil nil [e]]
+     (fn [state]
+       (let [ob (peek (:stk state))] 
+         (-> state
+             (update-in [:stk] pop)
+             (cond-> ob (assoc :eject ob)))))
+     
+     [:create nil [s] nil]
+     (fn [state]
+       (let [ob (peek (:stk state))] 
+         (-> state
+             (update-in [:stk] pop)
+             (cond-> ob (s ob)))))
+
+     [:create nil [s] [e]]
+     (fn [state]
+       (let [ob (peek (:stk state))] 
+         (-> state
+             (update-in [:stk] pop)
+             (cond-> ob (-> (s ob) (assoc :eject ob))))))
+     
+     [:create [f] nil [e]]
+     (fn [state]
+       (let [ob (some-> (peek (:stk state))
+                        (f))] 
+         (-> state
+             (update-in [:stk] pop)
+             (cond-> ob (assoc :eject ob)))))
+     
+     [:create [f] [s] nil]
+     (fn [state]
+       (let [ob (some-> (peek (:stk state))
+                        (f))] 
+         (-> state
+             (update-in [:stk] pop)
+             (cond-> ob (s ob)))))
+     
+     [:create [f] [s] [e]]
+     (fn [state]
+       (let [ob (some-> (peek (:stk state))
+                        (f))] 
+         (-> state
+             (update-in [:stk] pop)
+             (cond-> ob (-> (s ob) (assoc :eject ob)))))))))
+
 (defn start-element-f
   "Two-item vector - first, a boolean indicating whether the
   start-element handler produces a net change in the element nesting
@@ -133,83 +167,84 @@
         sink   (:sink pp) 
         text-sink (:text sink)
         
-        ;;criteria [prune? create? atts? text? text-assignable?]
-        criteria [(when (:prune rule) :prune)
-                  (when (:create rule) :create)
-                  (when (:atts rule) :atts)
-                  (when (:text-value rule) :text-value)
-                  (when (:text sink) :text-assignable)]]
+        ;;criteria [create? atts? content?]
+        criteria [(when (:create rule)     :create)
+                  (when (:atts rule)       :atts)
+                  (cond (:text sink)       :text-keep 
+                        (:text-value rule) :text-drop
+                        (:prune rule)      :prune
+                        :else              :children )]]
     (match/match
         criteria
       
-      [nil :create :atts :text-value :text-assignable]
+      [:create :atts :text-keep]
       [true (fn [state ^XMLStreamReader xsr]
                (-> state
                    (update-in [:stk] conj nil)
                    (assign-atts sink xsr)
                    (text-sink (.getElementText xsr))))]                   
       
-      [nil :create :atts :text-value nil]
+      [:create :atts :text-drop]
       [true (fn [state ^XMLStreamReader xsr]
               (.getElementText xsr) ;; Side effects XSR posn
               (-> state
                   (update-in [:stk] conj nil)
                   (assign-atts sink xsr)))]
       
-      [nil :create nil :text-value :text-assignable]
+      [:create nil :text-keep]
       [true (fn [state ^XMLStreamReader xsr]
                (-> state
                    (update-in [:stk] conj nil)
                    (text-sink (.getElementText xsr))))]
       
-      [nil _ nil :text-value nil]
+      [ _ nil :text-drop]
       [false (fn [state ^XMLStreamReader xsr]
               (.getElementText xsr) ;; Do not skip. Advances XSR to End.
               (-> state
                   (advance-xsr xsr)))]
       
-      [nil nil :atts :text-value :text-assignable]
+      [nil :atts :text-keep]
       [true (fn [state ^XMLStreamReader xsr]
-        (-> state
-            (assign-atts sink xsr)
-            (text-sink (.getElementText xsr))))]                   
-
-      [nil nil nil :text-value :text-assignable]
+              (-> state
+                  (assign-atts sink xsr)
+                  (text-sink (.getElementText xsr))))]                   
+      
+      [nil nil :text-keep]
       [true (fn [state ^XMLStreamReader xsr]
               (-> state
                   (text-sink (.getElementText xsr))))]                   
       
-      [nil nil :atts :text-value nil]
+      [nil :atts :text-drop]
       [true (fn [state ^XMLStreamReader xsr]
               (.getElementText xsr) ;; Do not skip. Advances XSR to End.
               (-> state
                   (assign-atts sink xsr)))]
       
-      [:prune nil nil nil nil]
+      [nil nil :prune]
       [false (fn [state ^XMLStreamReader xsr]
                (burn-stax xsr)
                (advance-xsr state xsr))]
       
-      [nil :create nil nil nil]
+      [:create nil :children]
       [true (fn [state ^XMLStreamReader xsr]
               (-> state
                   (update-in [:stk] conj nil)
                   (advance-xsr xsr)))]
       
-      [nil :create :atts nil nil]
+      [:create :atts :children]
       [true (fn [state ^XMLStreamReader xsr]
               (-> state
                   (update-in [:stk] conj nil)
                   (assign-atts (:sink pp) xsr)
                   (advance-xsr xsr)))]
       
-      [nil nil :atts nil nil]
+      [nil :atts :children]
       [true (fn [state ^XMLStreamReader xsr]
               (-> state 
                   (assign-atts (:sink pp) xsr)
                   (advance-xsr xsr)))]
       
-      [nil nil nil nil nil]
+      [nil nil :children]
       [true (fn [state ^XMLStreamReader xsr]
               (-> state 
                   (advance-xsr xsr)))]
@@ -235,7 +270,7 @@
   * :start-element - function of state and XMLStreamReader that 
     adjusts the state in response to a start-element event 
     and advances the XMLStreamReader"
-  [rules]
+  [rules symbols]
   (let [rev-idx        (reverse-path-index rules) 
         assign-targets (prop-targets rules)
         memo           (atom {})] 
@@ -290,7 +325,10 @@
 
                (as-> x (merge x
                               (zipmap [:depth-change :start-element] 
-                                      (start-element-f rules x))))))
+                                      (start-element-f rules x))))
+               (as-> x (merge x 
+                              (when-let [f (end-element-f symbols rules x)]
+                                {:end-element f})))))
             (disposal [rpath]
               (if-let [ret (@memo rpath)]
                 ret
@@ -298,12 +336,6 @@
                   (swap! memo assoc rpath v)
                   v)))]
       disposal)))
-
-(defn analyze-rules
-  "Studies rules and prepares indexes for speedy handling of StAX events."
-  [cfg symbols]
-  (->> cfg
-       (analyze-rules-*-compose-end-element symbols)))
 
 (defn pull-object
   "Interprets XML stream until an object is complete. Returns a
@@ -330,7 +362,8 @@
              (recur state' (if (:depth-change pp) rtags' rtags)))
          
            2 ;; XMLStreamConstants/END_ELEMENT
-           (let [state' (end-element state (pstrategy rtags))
+           (let [pp     (pstrategy rtags)
+                 state' ((:end-element pp) state)
                  rtags' (pop rtags)]
              (if-let [eject (:eject state')] 
                [eject (-> state'
@@ -348,9 +381,8 @@
   "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
   symbol to function, referred to by rule property complete-by."
   [rules symbols ^XMLStreamReader xsr]
-  (-> {:rules rules :rtags '() :stk [] :xsr xsr
-       :path-strategy (path-disposal rules)}
-      (analyze-rules symbols)))
+  {:rules rules :rtags '() :stk [] :xsr xsr
+   :path-strategy (path-disposal rules symbols)})
 
 (defn pull-seq
   "Lazy sequence of objects pulled from the XML stream. Rules -
