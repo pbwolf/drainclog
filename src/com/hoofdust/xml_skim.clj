@@ -4,7 +4,8 @@
   (:import [javax.xml.stream 
             XMLStreamConstants XMLStreamReader])
   (:require [clojure.set :as set] 
-            [clojure.string :as string]))
+            [clojure.string :as string]
+            [clojure.core.match :as match]))
 
 (defn assign-atts
   "Given a state accumulator, an XMLStreamReader that is positioned at
@@ -91,92 +92,6 @@
   "assign-multi replaces the slower (fnil conj [])"
   (conj (or c []) v))
 
-(defn path-disposal 
-  "Function of rpath that yields a map containing:
-
-  * :ruleno - the rule that applies to the rpath. May be nil.
-
-  * :rulestk - stack (vector) of indexes into rules of the rule for
-    this path and its ancestors.
-
-  * :ob? - whether this rule creates an object.
-
-  * :start-consumes-end? - whether the start-element handler consumes
-    the end-element event too (and everything in between).
-
-  * :var-idx - property-key to rulestk-index map, considering the
-    above rule's props, and all ancestor elements'.
-
-  * :sink - map of attribute name, or :text or :ob, to a fn of state
-    and a value, that either assigns the value to the property or
-    conj's it if the property is a multi, and returns revised state."
-  [rules]
-  (let [rev-idx        (reverse-path-index rules) 
-        assign-targets (prop-targets rules)
-        memo           (atom {})] 
-    (letfn [(updater [rules stk var-idx prop]
-              (when-let [frame-no (var-idx prop)]
-                (let [vruleno (get stk frame-no)
-                      rule    (rules vruleno)
-                      propdef (-> rule :create :props prop)
-                      multi?  (:multi propdef)
-                      route   [:stk frame-no prop]]
-                  (if multi?
-                    (fn u9 [state v] (update-in state route assign-multi v))
-                    (fn a1 [state v] (assoc-in state route v))))))
-            (new-disposal [rpath]
-              {:post [(vector? (:rulestk %))
-                      (map? (:sink %))]}
-              (if (seq rpath)
-                (let [parent        (disposal (drop 1 rpath))]
-                  (if-let [ruleno   (ruleno-from-index rev-idx rpath)]
-                    (let [p'rulestk (:rulestk parent)
-                          frameno   (count p'rulestk)
-                          rulestk   (conj p'rulestk ruleno)
-                          rule      (get rules ruleno)
-                          ob?       (boolean (:create rule))
-                          props     (seq (filter assign-targets 
-                                                 (-> rule :create :props keys)))
-                          ob-prop   (get-in rule [:create :assign])
-                          
-                          t-prop    (-> rule :text-value :assign)
-                          
-                          p'var-idx (:var-idx parent)
-                          var-idx   (merge p'var-idx
-                                           (zipmap props (repeat frameno)))
-                          
-                          start-consumes-end? 
-                                    (or (:prune rule) (:text-value rule))
-
-                          sink (->> (apply concat
-                                           (when ob-prop 
-                                             [[:ob p'var-idx ob-prop]])
-                                           (when t-prop 
-                                             [[:text var-idx t-prop]])
-                                           (for [[att {prop :assign}] (:atts rule)
-                                                 :when prop] 
-                                             [[att var-idx prop]]))
-                                    (map (fn [[k v p]]
-                                           (when-let 
-                                               [u (updater rules rulestk v p)]
-                                             {k u})))
-                                    (apply merge {}))
-                          ]
-                      {:ob? ob?, :ruleno ruleno, 
-                       :start-consumes-end? start-consumes-end?,
-                       :rulestk rulestk, :var-idx var-idx, :sink sink})
-                    (assoc parent :ob? nil, :ruleno nil, 
-                           :start-consumes-end? nil)))
-                {:ob? nil, :ruleno nil, :start-consumes-end? nil, 
-                 :rulestk [], :var-idx {}, :sink {}}))
-            (disposal [rpath]
-              (if-let [ret (@memo rpath)]
-                ret
-                (let [v (new-disposal rpath)]
-                  (swap! memo assoc rpath v)
-                  v)))]
-      disposal)))
-
 (defn burn-stax
   "With the XMLStreamReader initially parked at a start-element event,
   consume events until it is parked at the corresponding end-element.
@@ -195,81 +110,200 @@
      :else
      (recur levels (.next xsr)))))
 
-(defn- analyze-rules-*-compose-start-element
-  "Composes a :start-element handler for each rule"
-  [cfg]
-  (let [assign-targets (prop-targets (:rules cfg))] 
-    (update-in 
-     cfg [:rules]
-     (fn [rules]
-       (mapv (fn [rule] 
-               (assoc rule :start-element
-                      (let [atts   (:atts rule)
-                            ruleno (:ruleno rule)]
-                        (cond
-                         (and (:text-value rule) (:create rule))
-                         (fn [state pp ^XMLStreamReader xsr]
-                           (let [sink (:sink pp) 
-                                 af   (:text sink)]
-                             (-> state
-                                 (update-in [:stk] conj nil)
-                                 (cond-> atts (assign-atts sink xsr))
-                                 (cond-> af   (af (.getElementText xsr)))
-                                 (end-element pp))))
+;; definline?
+(defn advance-xsr 
+  "Advances the XMLStreamReader to the next event and returns state if
+  there is a next event to advance to; otherwise returns nil"
+  [state ^XMLStreamReader xsr]
+  (when (.hasNext xsr)
+    (.next xsr) 
+    state))
 
-                         (and (:text-value rule) (not (:create rule)))
-                         (fn [state pp ^XMLStreamReader xsr]
-                           (let [sink (:sink pp) 
-                                 af   (:text sink)]
-                             (-> state
-                                 (cond-> atts (assign-atts sink xsr))
-                                 (cond-> af   (af (.getElementText xsr))))))
+(defn start-element-f
+  "Two-item vector - first, a boolean indicating whether the
+  start-element handler produces a net change in the element nesting
+  level (It does not change the nesting level if it consumes not only
+  the start-element event, but also any text and the ensuing
+  end-element event); and second, a function, of state and
+  XMLStreamReader, to adjust the state upon a start-element event and
+  advance the XMLStreamReader to the next event."
+  [rules pp]
+  (let [rule   (get rules (:ruleno pp) nil) 
+        atts   (:atts rule)
+        sink   (:sink pp) 
+        text-sink (:text sink)
+        
+        ;;criteria [prune? create? atts? text? text-assignable?]
+        criteria [(when (:prune rule) :prune)
+                  (when (:create rule) :create)
+                  (when (:atts rule) :atts)
+                  (when (:text-value rule) :text-value)
+                  (when (:text sink) :text-assignable)]]
+    (match/match
+        criteria
+      
+      [nil :create :atts :text-value :text-assignable]
+      [true (fn [state ^XMLStreamReader xsr]
+               (-> state
+                   (update-in [:stk] conj nil)
+                   (assign-atts sink xsr)
+                   (text-sink (.getElementText xsr))))]                   
+      
+      [nil :create :atts :text-value nil]
+      [true (fn [state ^XMLStreamReader xsr]
+              (.getElementText xsr) ;; Side effects XSR posn
+              (-> state
+                  (update-in [:stk] conj nil)
+                  (assign-atts sink xsr)))]
+      
+      [nil :create nil :text-value :text-assignable]
+      [true (fn [state ^XMLStreamReader xsr]
+               (-> state
+                   (update-in [:stk] conj nil)
+                   (text-sink (.getElementText xsr))))]
+      
+      [nil _ nil :text-value nil]
+      [false (fn [state ^XMLStreamReader xsr]
+              (.getElementText xsr) ;; Do not skip. Advances XSR to End.
+              (-> state
+                  (advance-xsr xsr)))]
+      
+      [nil nil :atts :text-value :text-assignable]
+      [true (fn [state ^XMLStreamReader xsr]
+        (-> state
+            (assign-atts sink xsr)
+            (text-sink (.getElementText xsr))))]                   
 
-                         (:prune rule)
-                         (fn [state pp ^XMLStreamReader xsr]
-                           (burn-stax xsr)
-                           state)
-                         
-                         (:create rule)
-                         (fn [state pp ^XMLStreamReader xsr]
-                           (-> state
-                               (update-in [:stk] conj nil)
-                               (cond-> atts (assign-atts (:sink pp) xsr))))
-                         
-                         atts
-                         (fn [state pp ^XMLStreamReader xsr]
-                           (assign-atts state (:sink pp) xsr))
-                         
-                         :else
-                         nil))))
-             rules)))))
+      [nil nil nil :text-value :text-assignable]
+      [true (fn [state ^XMLStreamReader xsr]
+              (-> state
+                  (text-sink (.getElementText xsr))))]                   
+      
+      [nil nil :atts :text-value nil]
+      [true (fn [state ^XMLStreamReader xsr]
+              (.getElementText xsr) ;; Do not skip. Advances XSR to End.
+              (-> state
+                  (assign-atts sink xsr)))]
+      
+      [:prune nil nil nil nil]
+      [false (fn [state ^XMLStreamReader xsr]
+               (burn-stax xsr)
+               (advance-xsr state xsr))]
+      
+      [nil :create nil nil nil]
+      [true (fn [state ^XMLStreamReader xsr]
+              (-> state
+                  (update-in [:stk] conj nil)
+                  (advance-xsr xsr)))]
+      
+      [nil :create :atts nil nil]
+      [true (fn [state ^XMLStreamReader xsr]
+              (-> state
+                  (update-in [:stk] conj nil)
+                  (assign-atts (:sink pp) xsr)
+                  (advance-xsr xsr)))]
+      
+      [nil nil :atts nil nil]
+      [true (fn [state ^XMLStreamReader xsr]
+              (-> state 
+                  (assign-atts (:sink pp) xsr)
+                  (advance-xsr xsr)))]
+      
+      [nil nil nil nil nil]
+      [true (fn [state ^XMLStreamReader xsr]
+              (-> state 
+                  (advance-xsr xsr)))]
+      
+      :else
+      (throw (RuntimeException. (str "What to do with " criteria))))))
+
+(defn path-disposal 
+  "Function of rpath that yields a map containing:
+
+  * :ruleno - the rule that applies to the rpath. May be nil.
+
+  * :rulestk - stack (vector) of indexes into rules of the rule for
+    this path and its ancestors.
+
+  * :var-idx - property-key to rulestk-index map, considering the
+    above rule's props, and all ancestor elements'.
+
+  * :sink - map of attribute name, or :text or :ob, to a fn of state
+    and a value, that either assigns the value to the property or
+    conj's it if the property is a multi, and returns revised state.
+
+  * :start-element - function of state and XMLStreamReader that 
+    adjusts the state in response to a start-element event 
+    and advances the XMLStreamReader"
+  [rules]
+  (let [rev-idx        (reverse-path-index rules) 
+        assign-targets (prop-targets rules)
+        memo           (atom {})] 
+    (letfn [(updater [rules stk var-idx prop]
+              (when-let [frame-no (var-idx prop)]
+                (let [vruleno (get stk frame-no)
+                      rule    (rules vruleno)
+                      propdef (-> rule :create :props prop)
+                      multi?  (:multi propdef)
+                      route   [:stk frame-no prop]]
+                  (if multi?
+                    (fn u9 [state v] (update-in state route assign-multi v))
+                    (fn a1 [state v] (assoc-in state route v))))))
+            (new-disposal [rpath]
+              {:post [(vector? (:rulestk %))
+                      (map? (:sink %))]}
+              (->
+               (if (seq rpath)
+                 (let [parent        (disposal (drop 1 rpath))]
+                   (if-let [ruleno   (ruleno-from-index rev-idx rpath)]
+                     (let [p'rulestk (:rulestk parent)
+                           frameno   (count p'rulestk)
+                           rulestk   (conj p'rulestk ruleno)
+                           rule      (get rules ruleno)
+                           props     (seq (filter assign-targets 
+                                                  (-> rule :create :props keys)))
+                           ob-prop   (get-in rule [:create :assign])
+                          
+                           t-prop    (-> rule :text-value :assign)
+                          
+                           p'var-idx (:var-idx parent)
+                           var-idx   (merge p'var-idx
+                                            (zipmap props (repeat frameno)))
+                          
+                           sink (->> (apply concat
+                                            (when ob-prop 
+                                              [[:ob p'var-idx ob-prop]])
+                                            (when t-prop 
+                                              [[:text var-idx t-prop]])
+                                            (for [[att {prop :assign}] (:atts rule)
+                                                  :when prop] 
+                                              [[att var-idx prop]]))
+                                     (map (fn [[k v p]]
+                                            (when-let 
+                                                [u (updater rules rulestk v p)]
+                                              {k u})))
+                                     (apply merge {})) ]
+                       {:ruleno ruleno, 
+                        :rulestk rulestk, :var-idx var-idx, :sink sink})
+                     (assoc parent :ruleno nil)))
+                 {:ruleno nil, :rulestk [], :var-idx {}, :sink {}})
+
+               (as-> x (merge x
+                              (zipmap [:depth-change :start-element] 
+                                      (start-element-f rules x))))))
+            (disposal [rpath]
+              (if-let [ret (@memo rpath)]
+                ret
+                (let [v (new-disposal rpath)]
+                  (swap! memo assoc rpath v)
+                  v)))]
+      disposal)))
 
 (defn analyze-rules
   "Studies rules and prepares indexes for speedy handling of StAX events."
   [cfg symbols]
   (->> cfg
-       (analyze-rules-*-compose-end-element symbols)
-       (analyze-rules-*-compose-start-element)))
-
-(defn start-element 
-  "Handler for start-element events"
-  [{:keys [rules] :as state} pp]
-  (let [^XMLStreamReader xsr (:xsr state)
-        start-f (some-> (:ruleno pp)
-                        (rules)
-                        (:start-element))] 
-    (cond-> state start-f (start-f pp xsr))))
-
-(defn start-pull
-  "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
-  symbol to function, referred to by rule property complete-by."
-  [rules symbols ^XMLStreamReader xsr]
-  ;; Note: Tried keeping keywords, not strings, in :rtags, but,
-  ;; VisualVM said Symbol.intern was spending lots of time, and, sure
-  ;; enough, the program got faster after abandoning keywordization.
-  (-> {:rules rules :rtags '() :stk [] :xsr xsr
-       :path-strategy (path-disposal rules)}
-      (analyze-rules symbols)))
+       (analyze-rules-*-compose-end-element symbols)))
 
 (defn pull-object
   "Interprets XML stream until an object is complete. Returns a
@@ -277,44 +311,46 @@
   pull-object. Returns nil, instead of the vector, when the stream is
   over."
   [state]
-  (let [^XMLStreamReader xsr (:xsr state) 
-        pstrategy (:path-strategy state)] 
-    (loop [state state rtags (:rtags state)]
-      (let [e (.getEventType xsr)]
-        ;; It seemed that 'case' with constants ran a tiny bit faster
-        ;; than 'cond' with symbols.  Not worth it, I guess.
+  (when state
+   (let [^XMLStreamReader xsr (:xsr state) 
+         pstrategy (:path-strategy state)] 
+     (loop [state state rtags (:rtags state)]
+       (let [e (.getEventType xsr)]
+         ;; You might factor out the when-hasNext-next, but if you
+         ;; consequently factor out the conditional eject and apply it
+         ;; to events of all types, everything gets slower.
+         (case e
+           8 ;; XMLStreamConstants/END_DOCUMENT
+           nil
+         
+           1 ;; XMLStreamConstants/START_ELEMENT
+           (let [rtags' (conj rtags (.getLocalName xsr))
+                 pp     (pstrategy rtags')
+                 state' ((:start-element pp) state xsr)]
+             (recur state' (if (:depth-change pp) rtags' rtags)))
+         
+           2 ;; XMLStreamConstants/END_ELEMENT
+           (let [state' (end-element state (pstrategy rtags))
+                 rtags' (pop rtags)]
+             (if-let [eject (:eject state')] 
+               [eject (-> state'
+                          (dissoc :eject)
+                          (assoc :rtags rtags')
+                          (advance-xsr xsr))]
+               (when-let [state'' (advance-xsr state' xsr)] 
+                 (recur state'' rtags'))))
+         
+           ;; else
+           (when-let [state' (advance-xsr state xsr)] 
+             (recur state rtags))))))))
 
-        ;; You might factor out the when-hasNext-next, but if you
-        ;; consequently factor out the conditional eject and apply it
-        ;; to events of all types, everything gets slower.
-        (case e
-         8 ;; XMLStreamConstants/END_DOCUMENT
-         nil
-         
-         1 ;; XMLStreamConstants/START_ELEMENT
-         (let [rtags' (conj rtags (.getLocalName xsr))
-               pp     (pstrategy rtags')
-               state' (start-element state pp)]
-           (when (.hasNext xsr)
-             (.next xsr))
-           (recur state' (if (:start-consumes-end? pp) rtags rtags')))
-         
-         2 ;; XMLStreamConstants/END_ELEMENT
-         (let [state' (end-element state (pstrategy rtags))
-               rtags' (pop rtags)]
-           (when (.hasNext xsr)
-             (.next xsr))
-           (if-let [eject (:eject state')] 
-             [eject (-> state'
-                        (dissoc :eject)
-                        (assoc :rtags rtags'))]
-             (recur state' rtags')))
-         
-         ;; else
-         (do
-           (when (.hasNext xsr)
-            (.next xsr))
-           (recur state rtags)))))))
+(defn start-pull
+  "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
+  symbol to function, referred to by rule property complete-by."
+  [rules symbols ^XMLStreamReader xsr]
+  (-> {:rules rules :rtags '() :stk [] :xsr xsr
+       :path-strategy (path-disposal rules)}
+      (analyze-rules symbols)))
 
 (defn pull-seq
   "Lazy sequence of objects pulled from the XML stream. Rules -
@@ -326,3 +362,13 @@
              (when-let [[ob state'] (pull-object state)]
                (cons ob (thatch-hedge state')))))]
     (thatch-hedge (start-pull rules symbols xsr))))
+
+
+  ;; Note: Tried keeping keywords, not strings, in :rtags, but,
+  ;; VisualVM said Symbol.intern was spending lots of time, and, sure
+  ;; enough, the program got faster after abandoning keywordization.
+
+
+        ;; It seemed that 'case' with constants ran a tiny bit faster
+        ;; than 'cond' with symbols.  Not worth it, I guess.
+
