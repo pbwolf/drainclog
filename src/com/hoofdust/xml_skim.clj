@@ -75,14 +75,14 @@
      :else
      (recur levels (.next xsr)))))
 
-;; definline?
-(defn advance-xsr 
+(defmacro advance-xsr 
   "Advances the XMLStreamReader to the next event and returns state if
   there is a next event to advance to; otherwise returns nil"
-  [state ^XMLStreamReader xsr]
-  (when (.hasNext xsr)
-    (.next xsr) 
-    state))
+  [state xsr]
+  `(let [s# ~state] 
+     (when (.hasNext ~xsr)
+       (.next ~xsr) 
+       s#)))
 
 (defn end-element-f
   [symbols rules pp]
@@ -100,8 +100,7 @@
      criteria
 
      [nil _ _ _]
-     (fn [state]
-       state)
+     nil
 
      [:create _ nil nil]
      (fn [state]
@@ -326,9 +325,7 @@
                (as-> x (merge x
                               (zipmap [:depth-change :start-element] 
                                       (start-element-f rules x))))
-               (as-> x (merge x 
-                              (when-let [f (end-element-f symbols rules x)]
-                                {:end-element f})))))
+               (as-> x (assoc x :end-element (end-element-f symbols rules x)))))
             (disposal [rpath]
               (if-let [ret (@memo rpath)]
                 ret
@@ -346,7 +343,7 @@
   (when state
    (let [^XMLStreamReader xsr (:xsr state) 
          pstrategy (:path-strategy state)] 
-     (loop [state state rtags (:rtags state)]
+     (loop [state state rtags (:rtags state) pps (:pps state)]
        (let [e (.getEventType xsr)]
          ;; You might factor out the when-hasNext-next, but if you
          ;; consequently factor out the conditional eject and apply it
@@ -359,29 +356,35 @@
            (let [rtags' (conj rtags (.getLocalName xsr))
                  pp     (pstrategy rtags')
                  state' ((:start-element pp) state xsr)]
-             (recur state' (if (:depth-change pp) rtags' rtags)))
+             (recur state' 
+                    (if (:depth-change pp) rtags' rtags)
+                    (if (:depth-change pp) (conj pps pp) pps)))
          
            2 ;; XMLStreamConstants/END_ELEMENT
-           (let [pp     (pstrategy rtags)
-                 state' ((:end-element pp) state)
-                 rtags' (pop rtags)]
+           (let [pp     (peek pps)
+                 state' (if-let [f (:end-element pp)  ] 
+                          (f state)
+                          state)
+                 rtags' (pop rtags)
+                 pps'   (pop pps)]
              (if-let [eject (:eject state')] 
                [eject (-> state'
                           (dissoc :eject)
                           (assoc :rtags rtags')
+                          (assoc :pps pps')
                           (advance-xsr xsr))]
                (when-let [state'' (advance-xsr state' xsr)] 
-                 (recur state'' rtags'))))
+                 (recur state'' rtags' pps'))))
          
            ;; else
            (when-let [state' (advance-xsr state xsr)] 
-             (recur state rtags))))))))
+             (recur state rtags pps))))))))
 
 (defn start-pull
   "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
   symbol to function, referred to by rule property complete-by."
   [rules symbols ^XMLStreamReader xsr]
-  {:rules rules :rtags '() :stk [] :xsr xsr
+  {:rtags '() :pps [] :stk [] :xsr xsr
    :path-strategy (path-disposal rules symbols)})
 
 (defn pull-seq
