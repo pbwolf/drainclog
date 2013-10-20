@@ -36,7 +36,12 @@
                  (get-in rule `[~@kk :assign])))))
 
 (defn reverse-path-index
-  "Structure for ruleno-from-index to use"
+  "Structure for ruleno-from-index to use. It is a nested map where the
+  first lookup is of the leaf element tag name (from the rule's :path
+  member), the second lookup is of the leaf's immediate parent (if the
+  rule specifies it), etc.  Finally (since one rule's path tail may be
+  an extension of another's) the last lookup is of the keyword :end
+  and yields the index number of the rule in the rule vector."
   [rules]
   (-> rules
       (->> (map #(-> % :path (string/split #"/") reverse (concat [:end]))))
@@ -54,7 +59,7 @@
         (:end next-idx)))))
 
 (defn- assign-multi [c v]
-  "assign-multi replaces the slower (fnil conj [])"
+  "Workalike of the slower (fnil conj [])"
   (conj (or c []) v))
 
 (defn burn-stax
@@ -76,8 +81,10 @@
      (recur levels (.next xsr)))))
 
 (defmacro advance-xsr 
-  "Advances the XMLStreamReader to the next event and returns state if
-  there is a next event to advance to; otherwise returns nil"
+  "Advances the XMLStreamReader to the next event and returns the first
+  parameter if there is a next event to advance to; otherwise returns
+  nil. Meant as a thread-first operator on the parse state.  Being a
+  macro just inlines it."
   [state xsr]
   `(let [s# ~state] 
      (when (.hasNext ~xsr)
@@ -85,6 +92,8 @@
        s#)))
 
 (defn end-element-f
+  "Function to handle an end-element StAX event in the context of path
+  parameters pp, or nil if no end-element handler is necessary"
   [symbols rules pp]
   (let [rule (get rules (:ruleno pp) nil)
         criteria [(when (:create rule) 
@@ -252,23 +261,33 @@
       (throw (RuntimeException. (str "What to do with " criteria))))))
 
 (defn path-disposal 
-  "Function of rpath that yields a map containing:
+  "Function of a reverse path that yields a map containing:
 
-  * :ruleno - the rule that applies to the rpath. May be nil.
+  * :rpath - the reverse path.
 
-  * :rulestk - stack (vector) of indexes into rules of the rule for
-    this path and its ancestors.
+  * :rulestk - stack (vector) of non-nil indexes into rules of the
+    rule for this reverse-path and its ancestors'.
+
+  * :ruleno - the rule-list index of the rule that applies to the
+    rpath. May be nil, but otherwise same as peek of rulestk.
 
   * :var-idx - property-key to rulestk-index map, considering the
     above rule's props, and all ancestor elements'.
 
-  * :sink - map of attribute name, or :text or :ob, to a fn of state
-    and a value, that either assigns the value to the property or
-    conj's it if the property is a multi, and returns revised state.
+  * :sink - map of attribute name, or :text for character content, or
+    :ob for the map produced by a :create configuration rule, to a fn
+    of state and a value, that either assigns the value to the
+    property or conj's it if the property is a multi, and returns
+    revised state.
 
-  * :start-element - function of state and XMLStreamReader that 
-    adjusts the state in response to a start-element event 
-    and advances the XMLStreamReader"
+  * :start-element - function of state and XMLStreamReader that
+    adjusts the state in response to a start-element event and
+    advances the XMLStreamReader
+
+  * :end-element - function of state that adjusts the state in
+    response to a StAX end-element event.
+
+  The function is auto-memoizing."
   [rules symbols]
   (let [rev-idx        (reverse-path-index rules) 
         assign-targets (prop-targets rules)
@@ -284,8 +303,6 @@
                     (fn u9 [state v] (update-in state route assign-multi v))
                     (fn a1 [state v] (assoc-in state route v))))))
             (new-disposal [rpath]
-              {:post [(vector? (:rulestk %))
-                      (map? (:sink %))]}
               (->
                (if (seq rpath)
                  (let [parent        (disposal (drop 1 rpath))]
@@ -294,8 +311,9 @@
                            frameno   (count p'rulestk)
                            rulestk   (conj p'rulestk ruleno)
                            rule      (get rules ruleno)
-                           props     (seq (filter assign-targets 
-                                                  (-> rule :create :props keys)))
+                           props     (filter 
+                                      assign-targets 
+                                      (-> rule :create :props keys))
                            ob-prop   (get-in rule [:create :assign])
                           
                            t-prop    (-> rule :text-value :assign)
@@ -309,7 +327,8 @@
                                               [[:ob p'var-idx ob-prop]])
                                             (when t-prop 
                                               [[:text var-idx t-prop]])
-                                            (for [[att {prop :assign}] (:atts rule)
+                                            (for [[att {prop :assign}] 
+                                                  (:atts rule)
                                                   :when prop] 
                                               [[att var-idx prop]]))
                                      (map (fn [[k v p]]
@@ -317,15 +336,28 @@
                                                 [u (updater rules rulestk v p)]
                                               {k u})))
                                      (apply merge {})) ]
+                       ;; There is a rule number:
                        {:ruleno ruleno, 
-                        :rulestk rulestk, :var-idx var-idx, :sink sink})
-                     (assoc parent :ruleno nil)))
-                 {:ruleno nil, :rulestk [], :var-idx {}, :sink {}})
-
+                        :rpath rpath,
+                        :rulestk rulestk, 
+                        :var-idx var-idx, 
+                        :sink sink})
+                     ;; No rule number, but rev.path is non-empty:
+                     (assoc parent 
+                       :ruleno nil
+                       :rpath rpath)))
+                 ;; Rev.path is empty:
+                 {:ruleno nil, 
+                  :rulestk [], 
+                  :var-idx {}, 
+                  :sink {}
+                  :rpath rpath})
+               ;; Compose start- and end-element handlers based on the above:
                (as-> x (merge x
                               (zipmap [:depth-change :start-element] 
                                       (start-element-f rules x))))
                (as-> x (assoc x :end-element (end-element-f symbols rules x)))))
+            ;; Main function:
             (disposal [rpath]
               (if-let [ret (@memo rpath)]
                 ret
@@ -343,7 +375,8 @@
   (when state
    (let [^XMLStreamReader xsr (:xsr state) 
          pstrategy (:path-strategy state)] 
-     (loop [state state rtags (:rtags state) pps (:pps state)]
+     (loop [state state 
+            pps (:pps state)]
        (let [e (.getEventType xsr)]
          ;; You might factor out the when-hasNext-next, but if you
          ;; consequently factor out the conditional eject and apply it
@@ -353,11 +386,11 @@
            nil
          
            1 ;; XMLStreamConstants/START_ELEMENT
-           (let [rtags' (conj rtags (.getLocalName xsr))
+           (let [rtags  (:rpath (peek pps))
+                 rtags' (conj rtags (.getLocalName xsr))
                  pp     (pstrategy rtags')
                  state' ((:start-element pp) state xsr)]
              (recur state' 
-                    (if (:depth-change pp) rtags' rtags)
                     (if (:depth-change pp) (conj pps pp) pps)))
          
            2 ;; XMLStreamConstants/END_ELEMENT
@@ -365,20 +398,18 @@
                  state' (if-let [f (:end-element pp)  ] 
                           (f state)
                           state)
-                 rtags' (pop rtags)
                  pps'   (pop pps)]
              (if-let [eject (:eject state')] 
                [eject (-> state'
                           (dissoc :eject)
-                          (assoc :rtags rtags')
                           (assoc :pps pps')
                           (advance-xsr xsr))]
                (when-let [state'' (advance-xsr state' xsr)] 
-                 (recur state'' rtags' pps'))))
+                 (recur state'' pps'))))
          
            ;; else
            (when-let [state' (advance-xsr state xsr)] 
-             (recur state rtags pps))))))))
+             (recur state pps))))))))
 
 (defn start-pull
   "Rules - structure as illustrated in doc/sample.clj. Symbols - map of
