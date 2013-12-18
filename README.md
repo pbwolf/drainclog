@@ -1,6 +1,7 @@
 # xml-skim
 
-xml-skim plucks small facts from large XML files read with StAX.
+xml-skim plucks small facts from XML files via StAX (the JAXP
+streaming event API).
 
 A configuration data structure specifies:
 
@@ -12,17 +13,18 @@ A configuration data structure specifies:
 * which element's hash-map is a finished product to yield back to the
   consumer.
 
-The aim of this bike-shed hobby project was to make a macro that would
-turn the configuration file into a smoking-fast loop.  But before we
-wrote the macro to write the program, we figured we would write the
-program itself, just to see what it might look like.  At this rate, we
-might never get around to the macro after all. 
-
 xml-skim accumulates Clojure maps (of further maps, scalars, and
 vectors) of the content of elements with certain tag names, and ejects
 the accumulated maps to a lazy sequence.
 
-## Configuration
+Leiningen reference:
+
+	[com.hoofdust/xml-skim "0.2"]
+
+The test cases illustrate usage.  A small XML file, a sample
+configuration, and the expected output are in `dev-resources`.
+
+## XML parsing configuration
 
 The configuration describes (a) the file and (b) the resulting data
 structures.  See `doc/sample_configuration.clj`.
