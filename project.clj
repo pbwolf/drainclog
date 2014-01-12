@@ -1,5 +1,5 @@
-(defproject com.hoofdust/xml-skim "0.2"
-  :description "Skims data structures from XML using streaming APIs"
+(defproject com.hoofdust/xml-skim "0.3"
+  :description "Skims data structures from XML using JAXP streaming API"
   :url "http://hoofdust.com/"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}

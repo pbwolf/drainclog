@@ -1,7 +1,9 @@
+;; See sample_configuration.clj.
+
 [
  {:path "thing"
   :create {:props {:common-name {}, 
-                   :parts {:multi true}}
+                   :parts       {:multi true}}
            :eject true}}
 
  {:path "common-name" 
@@ -11,9 +13,9 @@
   :prune true}
 
  {:path "part"
-  :create {:props {:qty {}, 
+  :create {:props {:qty         {}, 
                    :common-name {}, 
-                   :parts {:multi true}}
+                   :parts       {:multi true}}
            :complete-by complete-part 
            :assign :parts}
   :atts {"qty" {:assign :qty}}}

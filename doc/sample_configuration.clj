@@ -1,13 +1,19 @@
 
-;; The configuration is a vector of rules. Here is a sample rule:
+;; The configuration is a vector of rules. 
+
+
+
+;; Here is a sample rule.  It is a hash map of :path and optionally
+;; :create, :atts, :text-value, and :prune.
 
 {
- ;; How to recognize an element: The longest configuration path that
- ;; matches an element is the one that applies. That is: if there are
- ;; 3 rules: grand/parent/tag, parent/tag, and tag, then
- ;; grand/parent/tag will be selected for great/grand/parent/tag and all
- ;; other actual paths that end with grand/parent/tag.
- ;; (Does not recognize "/" at the beginning signifying the document root.)
+ ;; :path is how to recognize an element. The *longest* configured
+ ;; path that matches an element is the one that applies to the
+ ;; element.  That is: if there are 3 rules: grand/parent/tag,
+ ;; parent/tag, and tag, then grand/parent/tag will be selected for
+ ;; great/grand/parent/tag and all other actual paths that end with
+ ;; grand/parent/tag.  (Does not recognize "/" at the beginning
+ ;; signifying the document root.)
 
  :path "tag" 
 
@@ -24,7 +30,10 @@
  ;;             that should be assigned to a member of a map created
  ;;             for this element or an enclosing element
  
- ;; If a Clojure map should be made from the element:
+ ;; If a Clojure map should be made from the element, the :create
+ ;; member specifies the properties (map keys) the resulting object
+ ;; may have, and optionally a :complete-by function (by symbol)
+ ;; to filter the object on its way to being assigned or ejected.
  :create
  {
   :props ;; The Clojure map may have the following members:

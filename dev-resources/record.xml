@@ -1,3 +1,4 @@
+<!-- Sample data that should be digested to the structure in record.edn -->
 <thing>
   <common-name>automobile</common-name>
   <parts>

@@ -1,3 +1,4 @@
+;; Data structure expected to be gleaned from record.xml
 {:common-name "automobile"
  :parts [{:qty 4
           :common-name "door"

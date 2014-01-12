@@ -5,7 +5,7 @@
             [com.hoofdust.xml-skim :refer :all]))
 
 (defn xml-stream-reader 
-  "Opens from a URI (string), or a Reader, in an XMLStreamReader"
+  "XMLStreamReader open on a URI (string), or a Reader"
   ^javax.xml.stream.XMLStreamReader [well]
   (.. javax.xml.stream.XMLInputFactory
       (newFactory)
@@ -36,6 +36,8 @@
     (with-open [xsr (xml-stream-reader (str (io/resource "record.xml")))]
       (testing "record rules"
         (is (= (vec (pull-seq rules 
+                              ;; test returning a fixed-up object.
+                              ;; test returning nil instead of object.
                               {'complete-part
                                 (fn [part] 
                                   (let [qty (Long/parseLong (:qty part))] 
